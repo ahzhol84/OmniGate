@@ -1,0 +1,82 @@
+# config.yaml
+global:
+  redis_addr: "127.0.0.1:6379"
+  db_dsn: "root:ffedcw@tcp(127.0.0.1:3306)/db_name"
+
+plugins:
+  # 温湿度传感器插件 - 支持多个设备
+  - name: "dyf20a_poller"
+    enabled: false
+    configs:
+      - auth:
+          username: "jjjjjjj"
+          password: "123456"
+          login_type: "1"
+          base_url: "https://api.jjjjjj.cn"
+          compony_name: "jjjjjj"
+        devices:
+          - id: "jjj"
+            type: "jjjj"
+            interval: "5m"
+          # - id: "930814"
+          #   type: "DYF20A"
+          #   interval: "10m"
+      # - auth:
+      #     username: "另一家公司"
+      #     password: "password123"
+      #     login_type: "1"
+      #     base_url: "https://api.dayufeng.cn"
+      #     compony_name: "第二公司"
+      #   devices:
+      #     - id: "940001"
+      #       type: "DYF20A"
+      #       interval: "3m"
+
+  # TCP监听插件 - 支持多个端口
+  - name: "generic_tcp_listener"
+    enabled: false
+    configs:
+      - listen_addr: ":8081"
+        compony_name: "jjjjjj"
+        device_id: "IMEI:jjjjjjjjj"
+      # - listen_addr: ":8082"
+      #   compony_name: "jjjj"
+      #   device_id: "IMEI:861178060450627"
+      # - listen_addr: ":8083"
+      #   compony_name: "jjj"
+      #   device_id: "DEVICE_001"
+
+  # HTTP响应插件 - 支持多个服务实例
+  - name: "simple_http_responder"
+    enabled: true
+    configs:
+      - listen_addr: ":8083"
+        username: "admin"
+        password: "password"
+        auth_key: "iot-shared-jjjjj-2026"
+      # - listen_addr: ":9002"
+      #   username: "admin2"
+      #   password: "password2"
+      #   auth_key: "iot-shared-jjjjjj-2026-2"
+
+  # 睡眠监测插件 - 支持多个设备
+  - name: "sxb"
+    enabled: true
+    configs:
+      - compony_name: "jjjjjjjj"
+        client_id: "jjjjjj"
+        client_secret: "jjjjjjj"
+        device_id: "AC1518F7E350"
+        base_url: "https://openapi.jjjjjjjj.com"
+        poll_interval: 0
+        listen_addr: ":8084"
+        auth_username: "admin"
+        auth_password: "password"
+        auth_key: "iot-jjjjjjjsecret-2026"
+      # - compony_name: "第二公司"
+      #   client_id: "CLIENT_002"
+      #   client_secret: "jjjjjj"
+      #   device_id: "jjjjjj"
+      #   base_url: "https://jjjjjj.sleepthing.com"
+      #   poll_interval: 30
+        # 不设置listen_addr则只启用轮询模式
