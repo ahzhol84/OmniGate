@@ -19,6 +19,7 @@ const (
 	defaultTokenTTL = 12 * time.Hour
 	tokenPrefix     = "auth:token:"
 	ipPrefix        = "auth:ip:"
+	maxTokensPerIP  = 3
 )
 
 // RedisClient 解耦，common.RDB 直接满足
@@ -76,7 +77,7 @@ func NewValidator(cfg AuthConfig, redis RedisClient, prefix string) (*Validator,
 func (v *Validator) LoginHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			http.Error(w, `{"code":-1,"msg":"method not allowed"}`, http.StatusMethodNotAllowed)
+			http.Error(w, `{"code":-1,"msg":"方法不允许”}`, http.StatusMethodNotAllowed)
 			return
 		}
 
@@ -84,12 +85,12 @@ func (v *Validator) LoginHandler() http.HandlerFunc {
 			Credential string `json:"credential"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, `{"code":-1,"msg":"invalid json"}`, http.StatusBadRequest)
+			http.Error(w, `{"code":-1,"msg":"无效的 JSON"}`, http.StatusBadRequest)
 			return
 		}
 
 		if req.Credential != v.expectedCred {
-			http.Error(w, `{"code":-1,"msg":"invalid credential"}`, http.StatusUnauthorized)
+			http.Error(w, `{"code":-1,"msg":"无效凭证"}`, http.StatusUnauthorized)
 			return
 		}
 
@@ -102,12 +103,38 @@ func (v *Validator) LoginHandler() http.HandlerFunc {
 		ipKey := ipPrefix + ip
 		tokenKey := tokenPrefix + token
 
-		// 原子替换旧token
 		pipe := v.redis.Pipeline()
-		if oldToken, _ := v.redis.Get(r.Context(), ipKey).Result(); oldToken != "" {
-			pipe.Del(r.Context(), tokenPrefix+oldToken)
+
+		var tokenList []string
+		if raw, err := v.redis.Get(r.Context(), ipKey).Result(); err == nil && raw != "" {
+			if e := json.Unmarshal([]byte(raw), &tokenList); e != nil {
+				tokenList = []string{raw}
+			}
 		}
-		pipe.Set(r.Context(), ipKey, token, v.ttl)
+
+		filtered := make([]string, 0, len(tokenList)+1)
+		for _, existing := range tokenList {
+			if existing != "" && existing != token {
+				filtered = append(filtered, existing)
+			}
+		}
+		filtered = append(filtered, token)
+
+		if len(filtered) > maxTokensPerIP {
+			evicted := filtered[0 : len(filtered)-maxTokensPerIP]
+			for _, old := range evicted {
+				pipe.Del(r.Context(), tokenPrefix+old)
+			}
+			filtered = filtered[len(filtered)-maxTokensPerIP:]
+		}
+
+		tokensBytes, err := json.Marshal(filtered)
+		if err != nil {
+			http.Error(w, `{"code":-1,"msg":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		pipe.Set(r.Context(), ipKey, string(tokensBytes), v.ttl)
 		pipe.Set(r.Context(), tokenKey, v.username, v.ttl)
 
 		if _, err := pipe.Exec(r.Context()); err != nil {
@@ -131,17 +158,17 @@ func (v *Validator) AuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get("X-Token")
 		if token == "" {
-			http.Error(w, `{"code":-1,"msg":"missing token"}`, http.StatusUnauthorized)
+			http.Error(w, `{"code":-1,"msg":"缺少令牌"}`, http.StatusUnauthorized)
 			return
 		}
 
 		username, err := v.redis.Get(r.Context(), tokenPrefix+token).Result()
 		if err == redis.Nil {
-			http.Error(w, `{"code":-1,"msg":"invalid or expired token"}`, http.StatusUnauthorized)
+			http.Error(w, `{"code":-1,"msg":"令牌无效或过期"}`, http.StatusUnauthorized)
 			return
 		}
 		if err != nil {
-			http.Error(w, `{"code":-1,"msg":"internal error"}`, http.StatusInternalServerError)
+			http.Error(w, `{"code":-1,"msg":"内部错误"}`, http.StatusInternalServerError)
 			return
 		}
 

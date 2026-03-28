@@ -32,6 +32,7 @@ type ConfigItem struct {
 	ClientID     string `json:"client_id"`
 	ClientSecret string `json:"client_secret"`
 	DeviceID     string `json:"device_id"`
+	UniqueID     string `json:"unique_id"`
 	BaseURL      string `json:"base_url"`
 	PollInterval int    `json:"poll_interval"` // 轮询间隔秒，默认60
 
@@ -234,6 +235,14 @@ func (w *SXBWorker) startPoller(ctx context.Context, out chan<- *base.DeviceData
 }
 
 func (w *SXBWorker) pollOnce(out chan<- *base.DeviceData, config ConfigItem, index int) {
+	uniqueDeviceID := common.ResolveDeviceUniqueID(
+		config.UniqueID,
+		config.ComponyName,
+		"sxb",
+		"SXB_SLEEP_MONITOR",
+		config.DeviceID,
+	)
+
 	// 辅助函数：包装调用并自动记录来源
 	call := func(fn func() ([]byte, error), dataType string) {
 		resp, err := fn()
@@ -243,7 +252,8 @@ func (w *SXBWorker) pollOnce(out chan<- *base.DeviceData, config ConfigItem, ind
 		}
 
 		data := &base.DeviceData{
-			DeviceID:    config.DeviceID,
+			DeviceID:    uniqueDeviceID,
+			UniqueID:    uniqueDeviceID,
 			DeviceType:  "SXB_SLEEP_MONITOR",
 			DataType:    dataType, // ← 自动填充
 			Timestamp:   time.Now(),
@@ -610,7 +620,20 @@ func (w *SXBWorker) handlePush(res http.ResponseWriter, req *http.Request, out c
 	defer req.Body.Close()
 
 	data := &base.DeviceData{
-		DeviceID:    config.DeviceID,
+		DeviceID: common.ResolveDeviceUniqueID(
+			config.UniqueID,
+			config.ComponyName,
+			"sxb",
+			"SXB_SLEEP_PUSH",
+			config.DeviceID,
+		),
+		UniqueID: common.ResolveDeviceUniqueID(
+			config.UniqueID,
+			config.ComponyName,
+			"sxb",
+			"SXB_SLEEP_PUSH",
+			config.DeviceID,
+		),
 		DeviceType:  "SXB_SLEEP_PUSH",
 		DataType:    pushType,
 		Timestamp:   time.Now(),
@@ -646,8 +669,10 @@ func (w *SXBWorker) Init(configs []json.RawMessage) error {
 		}
 
 		w.configs = append(w.configs, item)
-		log.Printf("[SXB] 配置%d: 公司=%s, 设备=%s, 轮询间隔=%ds, 监听地址=%s, 鉴权=%v",
-			i+1, item.ComponyName, item.DeviceID, item.PollInterval, item.ListenAddr,
+		log.Printf("[SXB] 配置%d: 公司=%s, 设备=%s, 唯一索引=%s, 轮询间隔=%ds, 监听地址=%s, 鉴权=%v",
+			i+1, item.ComponyName, item.DeviceID,
+			common.ResolveDeviceUniqueID(item.UniqueID, item.ComponyName, "sxb", "SXB", item.DeviceID),
+			item.PollInterval, item.ListenAddr,
 			item.AuthPassword != "" && item.AuthKey != "")
 	}
 

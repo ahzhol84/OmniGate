@@ -10,13 +10,13 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
-	"time"
 
 	"gopkg.in/yaml.v3"
 
 	_ "iot-middleware/plugins/dyf20a_poller"
-	_ "iot-middleware/plugins/generic_tcp_listener"
+	_ "iot-middleware/plugins/generic_http_listener"
 	_ "iot-middleware/plugins/simple_http_responder"
 	_ "iot-middleware/plugins/sxb_poller"
 )
@@ -30,7 +30,11 @@ func main() {
 
 	// 数据通道(传送带,暂存100条数据)
 	dataChan := make(chan *base.DeviceData, 100)
-	go common.StartDataWriter(dataChan)
+	writerDone := make(chan struct{})
+	go func() {
+		common.StartDataWriter(dataChan)
+		close(writerDone)
+	}()
 
 	// 按插件名称分组配置
 	pluginConfigs := make(map[string][]json.RawMessage)
@@ -76,6 +80,7 @@ func main() {
 	// 启动插件（每个插件一个 goroutine）
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	var workerWG sync.WaitGroup
 
 	log.Printf("🚀 开始启动插件，共 %d 个插件类型...", len(pluginConfigs))
 
@@ -91,7 +96,12 @@ func main() {
 			continue
 		}
 
-		go worker.Start(ctx, dataChan)
+		workerWG.Add(1)
+		go func(pluginName string, w base.IWorker) {
+			defer workerWG.Done()
+			w.Start(ctx, dataChan)
+			log.Printf("🧹 插件 %s 已退出", pluginName)
+		}(name, worker)
 		log.Printf("✅ 插件 %s 已启动（共 %d 个配置项）", name, len(configs))
 	}
 
@@ -101,5 +111,8 @@ func main() {
 	<-sigCh
 	log.Println("🛑 收到中断信号，正在关闭...")
 	cancel()
-	time.Sleep(2 * time.Second) //给时间让数据写入协程结束
+	workerWG.Wait()
+	close(dataChan)
+	<-writerDone
+	log.Println("✅ 数据已刷盘，服务已完成优雅退出")
 }

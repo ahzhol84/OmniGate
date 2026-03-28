@@ -3,27 +3,19 @@ package simple_http_responder
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"iot-middleware/pkg/auth"
 	"iot-middleware/pkg/base"
 	"iot-middleware/pkg/common"
 	"iot-middleware/pkg/plugin"
 	"log"
-	"math/rand"
-	"net"
 	"net/http"
 	"sync"
 	"time"
-
-	"github.com/go-redis/redis/v8"
 )
 
 const (
-	tokenTTL          = 12 * time.Hour
-	cleanupInterval   = 1 * time.Hour
 	defaultListenAddr = ":8080"
 	defaultUsername   = "admin"
 )
@@ -73,15 +65,6 @@ func (w *SimpleHTTPResponder) Init(configs []json.RawMessage) error {
 	return nil
 }
 
-func (w *SimpleHTTPResponder) generateToken() string {
-	const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, 32)
-	for i := range b {
-		b[i] = letters[rand.Intn(len(letters))]
-	}
-	return string(b)
-}
-
 func (w *SimpleHTTPResponder) Start(ctx context.Context, out chan<- *base.DeviceData) {
 	var wg sync.WaitGroup
 
@@ -120,100 +103,28 @@ func (w *SimpleHTTPResponder) Start(ctx context.Context, out chan<- *base.Device
 }
 
 func (w *SimpleHTTPResponder) startSingleService(ctx context.Context, out chan<- *base.DeviceData, config ConfigItem, index int) {
-	// 计算预期的 credential（HMAC-SHA256 + base64）
-	h := hmac.New(sha256.New, []byte(config.AuthKey))
-	h.Write([]byte(config.Password))
-	expectedCredential := base64.StdEncoding.EncodeToString(h.Sum(nil))
+	_ = out
+
+	validator, err := auth.NewValidator(auth.AuthConfig{
+		Username: config.Username,
+		Password: config.Password,
+		AuthKey:  config.AuthKey,
+		TTL:      12 * time.Hour,
+	}, common.RDB, fmt.Sprintf("responder-%d", index+1))
+	if err != nil {
+		log.Printf("[RESPONDER-%d] 鉴权初始化失败: %v", index+1, err)
+		return
+	}
 
 	mux := http.NewServeMux()
-
-	// 登录接口
-	mux.HandleFunc("/login", func(res http.ResponseWriter, req *http.Request) {
-		if req.Method != http.MethodPost {
-			http.Error(res, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		var payload struct {
-			Credential string `json:"credential"`
-		}
-		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
-			http.Error(res, "invalid json", http.StatusBadRequest)
-			return
-		}
-
-		if payload.Credential != expectedCredential {
-			http.Error(res, "invalid credential", http.StatusUnauthorized)
-			return
-		}
-
-		// 提取IP（处理IPv6和Port）
-		ip, _, err := net.SplitHostPort(req.RemoteAddr)
-		if err != nil {
-			ip = req.RemoteAddr // 兜底
-		}
-
-		token := w.generateToken()
-		ipKey := "responder:ip:" + ip
-		tokenKey := "responder:token:" + token
-
-		// 原子操作：查旧token -> 删旧token -> 写新token
-		pipe := common.RDB.Pipeline()
-
-		// 获取该IP已有的token
-		oldToken, _ := common.RDB.Get(ctx, ipKey).Result()
-		if oldToken != "" {
-			pipe.Del(ctx, "responder:token:"+oldToken) // 顶掉旧token
-			log.Printf("[RESPONDER-%d] IP %s 顶掉旧token", index+1, ip)
-		}
-
-		// 写新映射：IP->token, token->username
-		pipe.Set(ctx, ipKey, token, tokenTTL)
-		pipe.Set(ctx, tokenKey, config.Username, tokenTTL)
-
-		_, err = pipe.Exec(ctx)
-		if err != nil {
-			log.Printf("[RESPONDER-%d] [ERROR] Redis pipeline失败: %v", index+1, err)
-			http.Error(res, "internal error", http.StatusInternalServerError)
-			return
-		}
-
-		res.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(res).Encode(map[string]interface{}{
-			"code":       0,
-			"msg":        "ok",
-			"token":      token,
-			"expires_in": int(tokenTTL.Seconds()),
-		})
-		log.Printf("[RESPONDER-%d] IP %s 登录成功，token %s，有效期 %v", index+1, ip, token, tokenTTL)
-	})
-
-	// 业务接口
-	mux.HandleFunc("/hello", func(res http.ResponseWriter, req *http.Request) {
-		token := req.Header.Get("X-Token")
-		if token == "" {
-			http.Error(res, "missing X-Token header", http.StatusUnauthorized)
-			return
-		}
-
-		val, err := common.RDB.Get(req.Context(), "responder:token:"+token).Result()
-		if err == redis.Nil {
-			http.Error(res, "invalid or expired token", http.StatusUnauthorized)
-			return
-		}
-		if err != nil {
-			log.Printf("[RESPONDER-%d] [ERROR] Redis 查询 token 失败: %v", index+1, err)
-			http.Error(res, "internal error", http.StatusInternalServerError)
-			return
-		}
-		// val 是用户名（可选用于日志）
-		log.Printf("[RESPONDER-%d] [USERNAME] %s", index+1, val)
-
+	mux.HandleFunc("/login", validator.LoginHandler())
+	mux.HandleFunc("/hello", validator.AuthMiddleware(func(res http.ResponseWriter, req *http.Request) {
 		res.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		res.WriteHeader(http.StatusOK)
-		res.Write([]byte("hello world"))
-		log.Printf("[RESPONDER-%d] 请求来自 %s，使用有效 token", index+1, req.RemoteAddr)
-	})
+		//使用common.db连接数据库获取db_name中device_data表中的数据第一个并返回
+		res.Write([]byte(fmt.Sprintf("hello world")))
+		log.Printf("[RESPONDER-%d] 请求来自 %s，鉴权通过", index+1, req.RemoteAddr)
+	}))
 
 	server := &http.Server{
 		Addr:    config.ListenAddr,

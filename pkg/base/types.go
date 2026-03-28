@@ -10,6 +10,7 @@ import (
 // DeviceData 是所有设备上报数据的统一格式
 type DeviceData struct {
 	DeviceID    string          `json:"device_id"`
+	UniqueID    string          `json:"unique_id" gorm:"column:unique_id"`
 	DeviceType  string          `json:"device_type"`
 	Timestamp   time.Time       `json:"timestamp"` // Unix timestamp
 	Payload     json.RawMessage `json:"payload" gorm:"column:payload;type:json"`

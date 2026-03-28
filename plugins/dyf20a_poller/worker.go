@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 	"iot-middleware/pkg/base"
-	"iot-middleware/pkg/plugin"
+	"iot-middleware/pkg/common"
 	"log"
 	"net/http"
 	"sync"
@@ -25,7 +25,8 @@ type ConfigItem struct {
 	Devices []struct {
 		ID       string `json:"id"`
 		Type     string `json:"type"`
-		Interval string `json:"interval"` // e.g., "5m"
+		Interval string `json:"interval"`  // e.g., "5m"
+		UniqueID string `json:"unique_id"` // 设备唯一索引，可选
 	} `json:"devices"`
 }
 
@@ -36,17 +37,17 @@ type DYF20AWorker struct {
 
 func (w *DYF20AWorker) Init(configs []json.RawMessage) error {
 	log.Printf("[dyf20a] 开始初始化，配置项数量: %d", len(configs))
-	
+
 	w.authMap = make(map[string]*TokenManager)
 	totalDevices := 0
-	
+
 	for i, config := range configs {
 		var item ConfigItem
 		if err := json.Unmarshal(config, &item); err != nil {
 			return fmt.Errorf("第%d个配置解析失败: %v", i+1, err)
 		}
 		w.configs = append(w.configs, item)
-		
+
 		// 为每个BaseURL创建认证管理器（去重）
 		baseURL := item.Auth.BaseURL
 		if _, exists := w.authMap[baseURL]; !exists {
@@ -57,13 +58,13 @@ func (w *DYF20AWorker) Init(configs []json.RawMessage) error {
 			)
 			log.Printf("[dyf20a] 创建认证管理器: %s", baseURL)
 		}
-		
+
 		totalDevices += len(item.Devices)
-		log.Printf("[dyf20a] 配置%d: 公司=%s, 设备数=%d", 
+		log.Printf("[dyf20a] 配置%d: 公司=%s, 设备数=%d",
 			i+1, item.Auth.ComponyName, len(item.Devices))
 	}
-	
-	log.Printf("[dyf20a] 总计配置项: %d, 总设备数: %d, 认证管理器数: %d", 
+
+	log.Printf("[dyf20a] 总计配置项: %d, 总设备数: %d, 认证管理器数: %d",
 		len(configs), totalDevices, len(w.authMap))
 	return nil
 }
@@ -71,17 +72,17 @@ func (w *DYF20AWorker) Init(configs []json.RawMessage) error {
 func (w *DYF20AWorker) Start(ctx context.Context, out chan<- *base.DeviceData) {
 	var wg sync.WaitGroup
 	taskCount := 0
-	
+
 	log.Printf("[WORKER] 启动插件，开始调度设备任务...")
-	
+
 	// 遍历所有配置项和设备
 	for configIndex, config := range w.configs {
 		auth := w.authMap[config.Auth.BaseURL]
-		
+
 		for _, dev := range config.Devices {
 			taskCount++
 			wg.Add(1)
-			
+
 			go func(cfgIdx int, device DeviceInfo, authMgr *TokenManager, compony string) {
 				defer wg.Done()
 				w.runDeviceTask(ctx, out, cfgIdx, device, authMgr, compony)
@@ -90,7 +91,7 @@ func (w *DYF20AWorker) Start(ctx context.Context, out chan<- *base.DeviceData) {
 	}
 
 	log.Printf("[WORKER] 共启动 %d 个设备任务", taskCount)
-	
+
 	// 等待所有任务结束
 	done := make(chan struct{})
 	go func() {
@@ -107,9 +108,9 @@ func (w *DYF20AWorker) Start(ctx context.Context, out chan<- *base.DeviceData) {
 	}
 }
 
-func (w *DYF20AWorker) runDeviceTask(ctx context.Context, out chan<- *base.DeviceData, 
+func (w *DYF20AWorker) runDeviceTask(ctx context.Context, out chan<- *base.DeviceData,
 	configIndex int, device DeviceInfo, auth *TokenManager, componyName string) {
-	
+
 	interval, err := time.ParseDuration(device.Interval)
 	if err != nil {
 		log.Printf("[DEVICE-%s] 无效间隔 %s: %v", device.ID, device.Interval, err)
@@ -125,6 +126,15 @@ func (w *DYF20AWorker) runDeviceTask(ctx context.Context, out chan<- *base.Devic
 			log.Printf("[DEVICE-%s] 采集失败: %v", device.ID, err)
 			return
 		}
+		deviceNumericID := common.ResolveDeviceUniqueID(
+			device.UniqueID,
+			componyName,
+			"dyf20a_poller",
+			device.Type,
+			device.ID,
+		)
+		data.DeviceID = deviceNumericID
+		data.UniqueID = deviceNumericID
 		select {
 		case out <- data:
 			log.Printf("[DEVICE-%s] 数据已上报", device.ID)
@@ -135,7 +145,7 @@ func (w *DYF20AWorker) runDeviceTask(ctx context.Context, out chan<- *base.Devic
 
 	// 立即执行一次
 	runTask()
-	
+
 	// 定时执行
 	for {
 		select {
@@ -155,7 +165,7 @@ func (w *DYF20AWorker) fetch(DeviceID string, auth *TokenManager, componyName st
 	if token == "" {
 		log.Println("[FETCH] 警告: Token为空")
 	} else {
-		log.Printf("[FETCH] Token获取成功: %s", token)
+		log.Printf("[FETCH] Token获取成功: %s", maskToken(token))
 	}
 
 	apiURL := fmt.Sprintf("%s/monitor_currency?login_type=1&page=1&pageSize=10", auth.baseURL)
@@ -184,7 +194,11 @@ func (w *DYF20AWorker) fetch(DeviceID string, auth *TokenManager, componyName st
 	}
 
 	// 读取并解析JSON
-	bodyBytes, _ := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("[FETCH] 读取响应失败: %v", err)
+		return nil, err
+	}
 	log.Printf("[FETCH] 原始响应: %s", string(bodyBytes))
 
 	var raw map[string]interface{}
@@ -212,11 +226,11 @@ func (w *DYF20AWorker) fetch(DeviceID string, auth *TokenManager, componyName st
 	}
 	log.Printf("[FETCH] data数组长度: %d", len(dataArr))
 
-	// 取第一个设备数据
-	first, ok := dataArr[0].(map[string]interface{})
+	// 优先按DeviceID匹配设备数据，未匹配则回退第一条
+	first, ok := selectDeviceRecord(dataArr, DeviceID)
 	if !ok {
-		log.Printf("[FETCH] 错误: data[0]不是对象，实际类型: %T", dataArr[0])
-		return nil, fmt.Errorf("data[0] not object")
+		log.Printf("[FETCH] 错误: 未找到可解析设备记录，DeviceID=%s", DeviceID)
+		return nil, fmt.Errorf("no parseable device record")
 	}
 
 	// 解析data_list指标
@@ -270,15 +284,63 @@ func (w *DYF20AWorker) fetch(DeviceID string, auth *TokenManager, componyName st
 	}, nil
 }
 
+func maskToken(token string) string {
+	if token == "" {
+		return ""
+	}
+	if len(token) <= 8 {
+		return "****"
+	}
+	return token[:4] + "****" + token[len(token)-4:]
+}
+
+func selectDeviceRecord(dataArr []interface{}, deviceID string) (map[string]interface{}, bool) {
+	for _, entry := range dataArr {
+		record, ok := entry.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		if matchDeviceID(record, deviceID) {
+			return record, true
+		}
+	}
+
+	if len(dataArr) == 0 {
+		return nil, false
+	}
+
+	first, ok := dataArr[0].(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	log.Printf("[FETCH] 警告: 未匹配到DeviceID=%s，回退首条记录", deviceID)
+	return first, true
+}
+
+func matchDeviceID(record map[string]interface{}, deviceID string) bool {
+	if id, ok := record["id"]; ok && fmt.Sprint(id) == deviceID {
+		return true
+	}
+	if id, ok := record["device_id"]; ok && fmt.Sprint(id) == deviceID {
+		return true
+	}
+	if id, ok := record["deviceId"]; ok && fmt.Sprint(id) == deviceID {
+		return true
+	}
+	if id, ok := record["sn"]; ok && fmt.Sprint(id) == deviceID {
+		return true
+	}
+	if id, ok := record["imei"]; ok && fmt.Sprint(id) == deviceID {
+		return true
+	}
+	return false
+}
+
 // 设备信息结构体
 type DeviceInfo struct {
 	ID       string `json:"id"`
 	Type     string `json:"type"`
 	Interval string `json:"interval"`
-}
-
-func init() {
-	plugin.Register("dyf20a_poller", func() base.IWorker {
-		return &DYF20AWorker{}
-	})
+	UniqueID string `json:"unique_id"`
 }
