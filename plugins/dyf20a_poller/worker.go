@@ -9,6 +9,7 @@ import (
 	"iot-middleware/pkg/common"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -306,35 +307,35 @@ func selectDeviceRecord(dataArr []interface{}, deviceID string) (map[string]inte
 		}
 	}
 
-	if len(dataArr) == 0 {
-		return nil, false
-	}
-
-	first, ok := dataArr[0].(map[string]interface{})
-	if !ok {
-		return nil, false
-	}
-	log.Printf("[FETCH] 警告: 未匹配到DeviceID=%s，回退首条记录", deviceID)
-	return first, true
+	return nil, false
 }
 
 func matchDeviceID(record map[string]interface{}, deviceID string) bool {
-	if id, ok := record["id"]; ok && fmt.Sprint(id) == deviceID {
+	targetID := normalizeDeviceID(deviceID)
+
+	if id, ok := record["id"]; ok && normalizeDeviceID(fmt.Sprint(id)) == targetID {
 		return true
 	}
-	if id, ok := record["device_id"]; ok && fmt.Sprint(id) == deviceID {
+	if id, ok := record["device_id"]; ok && normalizeDeviceID(fmt.Sprint(id)) == targetID {
 		return true
 	}
-	if id, ok := record["deviceId"]; ok && fmt.Sprint(id) == deviceID {
+	if id, ok := record["deviceId"]; ok && normalizeDeviceID(fmt.Sprint(id)) == targetID {
 		return true
 	}
-	if id, ok := record["sn"]; ok && fmt.Sprint(id) == deviceID {
+	if id, ok := record["sn"]; ok && normalizeDeviceID(fmt.Sprint(id)) == targetID {
 		return true
 	}
-	if id, ok := record["imei"]; ok && fmt.Sprint(id) == deviceID {
+	if id, ok := record["imei"]; ok && normalizeDeviceID(fmt.Sprint(id)) == targetID {
+		return true
+	}
+	if id, ok := record["shebeibianhao"]; ok && normalizeDeviceID(fmt.Sprint(id)) == targetID {
 		return true
 	}
 	return false
+}
+
+func normalizeDeviceID(id string) string {
+	return strings.TrimSpace(id)
 }
 
 // 设备信息结构体

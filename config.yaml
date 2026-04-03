@@ -91,3 +91,19 @@ plugins:
       #   base_url: "https://openapi.sleepthing.com"
       #   poll_interval: 30
       #   不设置listen_addr则只启用轮询模式
+
+  # 爱牵挂 X8 推送接收插件（推荐单 URL 模式）
+  - name: "aiqiangua_x8"
+    enabled: true
+    configs:
+      - compony_name: "佳莱康"
+        listen_addr: ":8090"
+        # 对方可直接配置该 URL 作为统一回调入口
+        receive_path: "/push/aiqiangua/x8"
+        # 可选：同时支持 /push/aiqiangua/x8/location 等路径
+        path_prefix: "/push/aiqiangua/x8"
+        device_type: "AIQIANGUA_X8"
+        # 可选：按来源IP做白名单（支持单IP与CIDR）
+        # allowed_ips:
+        #   - "120.24.56.48"
+        #   - "120.24.56.0/24"

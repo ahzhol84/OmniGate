@@ -15,6 +15,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	_ "iot-middleware/plugins/aiqiangua_x8"
 	_ "iot-middleware/plugins/dyf20a_poller"
 	_ "iot-middleware/plugins/generic_http_listener"
 	_ "iot-middleware/plugins/simple_http_responder"
