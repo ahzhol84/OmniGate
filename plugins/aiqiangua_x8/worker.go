@@ -146,42 +146,55 @@ func (w *Worker) handlePush(rw http.ResponseWriter, req *http.Request, out chan<
 		http.Error(rw, "invalid form body", http.StatusBadRequest)
 		return
 	}
+	normalizeStepNumberField(values)
 
 	eventType := detectEventType(req.URL, req.URL.Path, values)
-	deviceSourceID := resolveDeviceSourceID(values)
+	reportedDeviceType := resolveReportedDeviceType(values, cfg.DeviceType)
+	deviceIMEI := resolveDeviceIMEI(values)
+	deviceSourceID := deviceIMEI
+	if deviceSourceID == "" {
+		deviceSourceID = resolveDeviceSourceID(values)
+	}
 	if deviceSourceID == "" {
 		deviceSourceID = "unknown"
+	}
+	if deviceIMEI == "" {
+		deviceIMEI = deviceSourceID
 	}
 
 	resolvedUniquePrefix := strings.TrimSpace(cfg.UniquePrefix)
 	if resolvedUniquePrefix == "" {
-		resolvedUniquePrefix = fmt.Sprintf("%s|%s", cfg.ComponyName, deviceSourceID)
+		resolvedUniquePrefix = cfg.ComponyName
 	}
 
-	uniqueID := common.ResolveDeviceUniqueID(
-		resolvedUniquePrefix,
+	physicalKey := buildPhysicalKey(reportedDeviceType, deviceIMEI)
+	logicalKey := buildLogicalKey(physicalKey, eventType)
+
+	deviceID := common.ResolveDeviceUniqueID(
+		fmt.Sprintf("%s|%s", resolvedUniquePrefix, physicalKey),
 		cfg.ComponyName,
 		"aiqiangua_x8",
-		cfg.DeviceType,
+		reportedDeviceType,
+		deviceSourceID,
+	)
+
+	uniqueID := common.ResolveDeviceUniqueID(
+		fmt.Sprintf("%s|%s", resolvedUniquePrefix, logicalKey),
+		cfg.ComponyName,
+		"aiqiangua_x8",
+		reportedDeviceType,
 		deviceSourceID,
 	)
 
 	eventTime := parseEventTime(values)
 
-	payloadObj := map[string]interface{}{
-		"vendor":      "aiqiangua",
-		"model":       "x8",
-		"event_type":  eventType,
-		"path":        req.URL.Path,
-		"query":       req.URL.RawQuery,
-		"remote_ip":   remoteIP,
-		"content_type": req.Header.Get("Content-Type"),
-		"form":        values,
-		"raw_body":    string(body),
-		"received_at": time.Now().Format(time.RFC3339),
-	}
-	if !eventTime.IsZero() {
-		payloadObj["event_time"] = eventTime.Format(time.RFC3339)
+	payloadObj, keep := buildPayload(eventType, values, deviceIMEI, eventTime)
+	if !keep {
+		rw.Header().Set("Content-Type", "application/json; charset=utf-8")
+		rw.WriteHeader(http.StatusOK)
+		_, _ = rw.Write([]byte(`{"code":0,"msg":"ignored"}`))
+		log.Printf("[AIQG-X8-%d] ignore unmapped event=%s imei=%s", workerIndex, eventType, deviceSourceID)
+		return
 	}
 
 	payload, err := json.Marshal(payloadObj)
@@ -191,9 +204,9 @@ func (w *Worker) handlePush(rw http.ResponseWriter, req *http.Request, out chan<
 	}
 
 	data := &base.DeviceData{
-		DeviceID:    uniqueID,
+		DeviceID:    deviceID,
 		UniqueID:    uniqueID,
-		DeviceType:  cfg.DeviceType,
+		DeviceType:  reportedDeviceType,
 		DataType:    eventType,
 		Timestamp:   chooseTimestamp(eventTime),
 		Payload:     payload,
@@ -205,11 +218,63 @@ func (w *Worker) handlePush(rw http.ResponseWriter, req *http.Request, out chan<
 		rw.Header().Set("Content-Type", "application/json; charset=utf-8")
 		rw.WriteHeader(http.StatusOK)
 		_, _ = rw.Write([]byte(`{"code":0,"msg":"ok"}`))
-		log.Printf("[AIQG-X8-%d] recv event=%s imei=%s unique=%s", workerIndex, eventType, deviceSourceID, uniqueID)
+		log.Printf("[AIQG-X8-%d] recv event=%s imei=%s device_id=%s unique=%s", workerIndex, eventType, deviceSourceID, deviceID, uniqueID)
 	case <-time.After(3 * time.Second):
 		http.Error(rw, "busy", http.StatusServiceUnavailable)
 		log.Printf("[AIQG-X8-%d] channel busy, drop event=%s imei=%s", workerIndex, eventType, deviceSourceID)
 	}
+}
+
+func buildPayload(eventType string, values map[string]string, deviceIMEI string, eventTime time.Time) (map[string]interface{}, bool) {
+	allowed := map[string][]string{
+		"EXERCISE_HEART_RATE": {"average_heartrate", "imei", "max_heartrate", "min_heartrate", "step", "time_begin"},
+		"BLOOD_OXYGEN":        {"bloodoxygen", "imei", "time_begin"},
+		"BLOOD_PRESSURE":      {"dbp", "imei", "sbp", "time_begin"},
+		"SLEEP":               {"awake_time", "deep_sleep", "imei", "light_sleep", "time_begin", "time_end", "total_sleep"},
+		"STEP":                {"imei", "step_number_value", "time_begin"},
+		"HEART_RATE":          {"heartrate", "imei", "time_begin"},
+		"LOCATION":            {"address", "city", "imei", "lat", "lon", "time_begin"},
+	}
+
+	fields, ok := allowed[eventType]
+	if !ok {
+		return nil, false
+	}
+
+	payload := make(map[string]interface{}, len(fields))
+	for _, key := range fields {
+		switch key {
+		case "imei":
+			if imei := normalizeIdentityPart(deviceIMEI); imei != "" {
+				payload["imei"] = imei
+			}
+		case "time_begin":
+			if raw := strings.TrimSpace(values["time_begin"]); raw != "" {
+				payload["time_begin"] = raw
+			} else if !eventTime.IsZero() {
+				payload["time_begin"] = eventTime.Format("2006-01-02 15:04:05")
+			}
+		case "heartrate":
+			raw := strings.TrimSpace(values["heartrate"])
+			if raw == "" {
+				continue
+			}
+			if v, err := strconv.Atoi(raw); err == nil {
+				payload["heartrate"] = v
+			} else {
+				payload["heartrate"] = raw
+			}
+		default:
+			if raw := strings.TrimSpace(values[key]); raw != "" {
+				payload[key] = raw
+			}
+		}
+	}
+
+	if len(payload) == 0 {
+		return nil, false
+	}
+	return payload, true
 }
 
 func parseForm(req *http.Request) (map[string]string, error) {
@@ -244,12 +309,86 @@ func resolveDeviceSourceID(values map[string]string) string {
 	return ""
 }
 
+func normalizeStepNumberField(values map[string]string) {
+	if values == nil {
+		return
+	}
+
+	if v := strings.TrimSpace(values["step_number_value"]); v != "" {
+		values["step_number_value"] = v
+		if raw := strings.TrimSpace(values["stepNumber"]); raw == "" {
+			values["stepNumber"] = v
+		}
+		delete(values, "value")
+		return
+	}
+
+	if v := strings.TrimSpace(values["stepNumber"]); v != "" {
+		values["stepNumber"] = v
+		values["step_number_value"] = v
+		delete(values, "value")
+		return
+	}
+
+	if v := strings.TrimSpace(values["value"]); v != "" {
+		values["step_number_value"] = v
+		values["stepNumber"] = v
+		delete(values, "value")
+	}
+}
+
+func resolveDeviceIMEI(values map[string]string) string {
+	for _, key := range []string{"imei", "deviceid", "device_id", "devID", "devId"} {
+		if value := normalizeIdentityPart(values[key]); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func resolveReportedDeviceType(values map[string]string, fallback string) string {
+	for _, key := range []string{"device_type", "devicetype", "model", "type_name"} {
+		if value := strings.TrimSpace(values[key]); value != "" {
+			return normalizeDataType(value)
+		}
+	}
+	return normalizeDataType(fallback)
+}
+
+func normalizeIdentityPart(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = strings.ReplaceAll(value, "|", "_")
+	return value
+}
+
+func buildPhysicalKey(deviceType, imei string) string {
+	resolvedType := normalizeDataType(deviceType)
+	resolvedIMEI := normalizeIdentityPart(imei)
+	if resolvedIMEI == "" {
+		resolvedIMEI = "unknown"
+	}
+	return fmt.Sprintf("%s|%s", resolvedType, resolvedIMEI)
+}
+
+func buildLogicalKey(physicalKey, eventType string) string {
+	return fmt.Sprintf("%s|%s", normalizeIdentityPart(physicalKey), normalizeDataType(eventType))
+}
+
 func detectEventType(u *url.URL, path string, form map[string]string) string {
 	if v := strings.TrimSpace(u.Query().Get("event")); v != "" {
 		return normalizeDataType(v)
 	}
 	if v := strings.TrimSpace(u.Query().Get("type_name")); v != "" {
 		return normalizeDataType(v)
+	}
+
+	for _, key := range []string{"event", "type_name", "event_type", "data_type"} {
+		if v := strings.TrimSpace(form[key]); v != "" {
+			return normalizeDataType(v)
+		}
 	}
 
 	lowerPath := strings.ToLower(path)
@@ -276,6 +415,9 @@ func detectEventType(u *url.URL, path string, form map[string]string) string {
 	if _, ok := form["reply_type"]; ok {
 		return "ALERT_REPLY"
 	}
+	if _, ok := form["sos"]; ok {
+		return "SOS"
+	}
 	if _, ok := form["bloodoxygen"]; ok {
 		return "BLOOD_OXYGEN"
 	}
@@ -285,16 +427,36 @@ func detectEventType(u *url.URL, path string, form map[string]string) string {
 	if _, ok := form["remaining_power"]; ok {
 		return "POWER"
 	}
+	if _, ok := form["awake_time"]; ok {
+		_, hasLon := form["lon"]
+		_, hasLat := form["lat"]
+		_, hasAddress := form["address"]
+		if hasLon && hasLat && hasAddress {
+			return "FALL"
+		}
+	}
 	if _, ok := form["deep_sleep"]; ok {
 		return "SLEEP"
 	}
-	if _, ok := form["value"]; ok {
+	if _, ok := form["step_number_value"]; ok {
+		return "STEP"
+	}
+	if _, ok := form["stepNumber"]; ok {
 		return "STEP"
 	}
 	if _, ok := form["max_heartrate"]; ok {
 		return "EXERCISE_HEART_RATE"
 	}
 	if _, ok := form["heartrate"]; ok {
+		_, hasCity := form["city"]
+		_, hasAddress := form["address"]
+		_, hasLon := form["lon"]
+		_, hasLat := form["lat"]
+		_, hasHighThreshold := form["theshold_heartrate_h"]
+		_, hasLowThreshold := form["theshold_heartrate_l"]
+		if hasCity && hasAddress && hasLon && hasLat && !hasHighThreshold && !hasLowThreshold {
+			return "SOS"
+		}
 		return "HEART_RATE"
 	}
 	if _, ok := form["is_track"]; ok {

@@ -6,7 +6,7 @@ global:
 plugins:
   # 温湿度传感器插件 - 支持多个设备
   - name: "dyf20a_poller"
-    enabled: true
+    enabled: false
     configs:
       - auth:
           username: "北京佳莱康健康科技公司"
