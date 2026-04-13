@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -37,6 +38,30 @@ type ConfigItem struct {
 type GenericHTTPListener struct {
 	configs []ConfigItem
 	servers []*http.Server
+}
+
+type realtimeCacheStats struct {
+	hits     uint64
+	misses   uint64
+	setOK    uint64
+	setFails uint64
+}
+
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (w *loggingResponseWriter) WriteHeader(code int) {
+	w.statusCode = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *loggingResponseWriter) Write(body []byte) (int, error) {
+	if w.statusCode == 0 {
+		w.statusCode = http.StatusOK
+	}
+	return w.ResponseWriter.Write(body)
 }
 
 func (w *GenericHTTPListener) Init(configs []json.RawMessage) error {
@@ -88,6 +113,9 @@ func (w *GenericHTTPListener) Start(ctx context.Context, out chan<- *base.Device
 }
 
 func (w *GenericHTTPListener) run(ctx context.Context, out chan<- *base.DeviceData, cfg ConfigItem, index int) {
+	stats := &realtimeCacheStats{}
+	go logRealtimeCacheStats(ctx, index+1, stats)
+
 	validator, err := auth.NewValidator(auth.AuthConfig{
 		Username: cfg.Username,
 		Password: cfg.Password,
@@ -99,8 +127,8 @@ func (w *GenericHTTPListener) run(ctx context.Context, out chan<- *base.DeviceDa
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/login", validator.LoginHandler())
-	mux.HandleFunc("/device/realtime", validator.AuthMiddleware(func(rw http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/login", withRequestLog(index+1, "/login", validator.LoginHandler()))
+	mux.HandleFunc("/device/realtime", withRequestLog(index+1, "/device/realtime", validator.AuthMiddleware(func(rw http.ResponseWriter, r *http.Request) {
 		if common.DB == nil {
 			http.Error(rw, "database not initialized", http.StatusInternalServerError)
 			return
@@ -136,7 +164,13 @@ func (w *GenericHTTPListener) run(ctx context.Context, out chan<- *base.DeviceDa
 			if err == nil {
 				if common.RDB != nil {
 					cacheKey := realtimeCacheKey(normalizedID)
-					_ = common.RDB.Set(r.Context(), cacheKey, payloadBytes, time.Duration(cfg.RealtimeTTLSeconds)*time.Second).Err()
+					if err := common.RDB.Set(r.Context(), cacheKey, payloadBytes, time.Duration(cfg.RealtimeTTLSeconds)*time.Second).Err(); err != nil {
+						atomic.AddUint64(&stats.setFails, 1)
+						log.Printf("[RESPONDER-%d] redis set realtime failed: key=%s device=%s err=%v", index+1, cacheKey, normalizedID, err)
+					} else {
+						atomic.AddUint64(&stats.setOK, 1)
+						log.Printf("[RESPONDER-%d] redis set realtime ok: key=%s ttl=%ds device=%s", index+1, cacheKey, cfg.RealtimeTTLSeconds, normalizedID)
+					}
 				}
 
 				select {
@@ -170,12 +204,18 @@ func (w *GenericHTTPListener) run(ctx context.Context, out chan<- *base.DeviceDa
 		if common.RDB != nil {
 			cacheKey := realtimeCacheKey(normalizedID)
 			if raw, err := common.RDB.Get(r.Context(), cacheKey).Bytes(); err == nil {
+				atomic.AddUint64(&stats.hits, 1)
+				log.Printf("[RESPONDER-%d] redis hit realtime: key=%s device=%s", index+1, cacheKey, normalizedID)
+				rw.Header().Set("X-Data-Source", "redis")
 				writeJSON(rw, http.StatusOK, map[string]interface{}{
 					"device_id": normalizedID,
 					"source":    "redis",
 					"payload":   toJSONObject(raw),
 				})
 				return
+			} else if err == redis.Nil {
+				atomic.AddUint64(&stats.misses, 1)
+				log.Printf("[RESPONDER-%d] redis miss realtime: key=%s device=%s", index+1, cacheKey, normalizedID)
 			} else if err != redis.Nil {
 				log.Printf("[RESPONDER-%d] redis get realtime failed: %v", index+1, err)
 			}
@@ -209,7 +249,13 @@ func (w *GenericHTTPListener) run(ctx context.Context, out chan<- *base.DeviceDa
 
 		if common.RDB != nil {
 			cacheKey := realtimeCacheKey(normalizedID)
-			_ = common.RDB.Set(r.Context(), cacheKey, latest.Payload, time.Duration(cfg.RealtimeTTLSeconds)*time.Second).Err()
+			if err := common.RDB.Set(r.Context(), cacheKey, latest.Payload, time.Duration(cfg.RealtimeTTLSeconds)*time.Second).Err(); err != nil {
+				atomic.AddUint64(&stats.setFails, 1)
+				log.Printf("[RESPONDER-%d] redis set realtime failed: key=%s device=%s err=%v", index+1, cacheKey, normalizedID, err)
+			} else {
+				atomic.AddUint64(&stats.setOK, 1)
+				log.Printf("[RESPONDER-%d] redis set realtime ok: key=%s ttl=%ds device=%s", index+1, cacheKey, cfg.RealtimeTTLSeconds, normalizedID)
+			}
 		}
 
 		if strings.TrimSpace(latest.UniqueID) == "" {
@@ -224,9 +270,9 @@ func (w *GenericHTTPListener) run(ctx context.Context, out chan<- *base.DeviceDa
 			"payload":     toJSONObject([]byte(latest.Payload)),
 			"timestamp":   latest.Timestamp,
 		})
-	}))
+	})))
 
-	mux.HandleFunc("/device/history/simpolist", validator.AuthMiddleware(func(rw http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/device/history/simpolist", withRequestLog(index+1, "/device/history/simpolist", validator.AuthMiddleware(func(rw http.ResponseWriter, r *http.Request) {
 		if common.DB == nil {
 			http.Error(rw, "database not initialized", http.StatusInternalServerError)
 			return
@@ -252,6 +298,7 @@ func (w *GenericHTTPListener) run(ctx context.Context, out chan<- *base.DeviceDa
 		cacheKey := historyCacheKey(normalizedID, page, pageSize)
 		if common.RDB != nil {
 			if raw, err := common.RDB.Get(r.Context(), cacheKey).Bytes(); err == nil {
+				rw.Header().Set("X-Data-Source", "redis")
 				rw.Header().Set("Content-Type", "application/json; charset=utf-8")
 				rw.WriteHeader(http.StatusOK)
 				_, _ = rw.Write(raw)
@@ -325,16 +372,17 @@ func (w *GenericHTTPListener) run(ctx context.Context, out chan<- *base.DeviceDa
 		}
 
 		rw.Header().Set("Content-Type", "application/json; charset=utf-8")
+		rw.Header().Set("X-Data-Source", "db")
 		rw.WriteHeader(http.StatusOK)
 		_, _ = rw.Write(respBytes)
-	}))
+	})))
 
-	mux.HandleFunc("/device/history/simplelist", validator.AuthMiddleware(func(rw http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/device/history/simplelist", withRequestLog(index+1, "/device/history/simplelist", validator.AuthMiddleware(func(rw http.ResponseWriter, r *http.Request) {
 		r.URL.Path = "/device/history/simpolist"
 		mux.ServeHTTP(rw, r)
-	}))
+	})))
 
-	mux.HandleFunc("/hello", validator.AuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/hello", withRequestLog(index+1, "/hello", validator.AuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if common.DB == nil {
 			http.Error(w, "database not initialized", http.StatusInternalServerError)
 			return
@@ -368,7 +416,7 @@ func (w *GenericHTTPListener) run(ctx context.Context, out chan<- *base.DeviceDa
 			"device_id": latest.DeviceID,
 			"payload":   json.RawMessage(latest.Payload), // payload是JSON字符串时可直接嵌入
 		})
-	}))
+	})))
 
 	srv := &http.Server{Addr: cfg.ListenAddr, Handler: mux}
 	w.servers = append(w.servers, srv)
@@ -398,6 +446,31 @@ func realtimeCacheKey(deviceID string) string {
 
 func historyCacheKey(deviceID string, page, pageSize int) string {
 	return fmt.Sprintf("goiot:history:simpolist:%s:%d:%d", strings.TrimSpace(deviceID), page, pageSize)
+}
+
+func logRealtimeCacheStats(ctx context.Context, responderID int, stats *realtimeCacheStats) {
+	ticker := time.NewTicker(20 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			hits := atomic.SwapUint64(&stats.hits, 0)
+			misses := atomic.SwapUint64(&stats.misses, 0)
+			setOK := atomic.SwapUint64(&stats.setOK, 0)
+			setFails := atomic.SwapUint64(&stats.setFails, 0)
+			total := hits + misses
+
+			hitRate := 0.0
+			if total > 0 {
+				hitRate = float64(hits) / float64(total) * 100
+			}
+
+			log.Printf("[RESPONDER-%d] realtime cache stats(20m): hit=%d miss=%d set_ok=%d set_fail=%d hit_rate=%.1f%%", responderID, hits, misses, setOK, setFails, hitRate)
+		}
+	}
 }
 
 func normalizeDeviceID(cfg ConfigItem, requestedID string) (normalizedID string, sourceDeviceID string, err error) {
@@ -471,7 +544,43 @@ func toJSONObject(raw []byte) interface{} {
 	return map[string]interface{}{"raw": string(raw)}
 }
 
+func withRequestLog(responderID int, route string, next http.HandlerFunc) http.HandlerFunc {
+	return func(rw http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		lw := &loggingResponseWriter{ResponseWriter: rw, statusCode: http.StatusOK}
+		next(lw, r)
+
+		status := lw.statusCode
+		latency := time.Since(start).Round(time.Millisecond)
+		deviceID := strings.TrimSpace(r.URL.Query().Get("device_id"))
+		if deviceID == "" {
+			deviceID = "-"
+		}
+		source := strings.TrimSpace(lw.Header().Get("X-Data-Source"))
+		if source == "" {
+			source = "-"
+		}
+
+		if status >= 400 {
+			log.Printf("[RESPONDER-%d] %s %s status=%d cost=%s device=%s source=%s", responderID, r.Method, route, status, latency, deviceID, source)
+			return
+		}
+
+		if route == "/device/realtime" || strings.HasPrefix(route, "/device/history/") {
+			log.Printf("[RESPONDER-%d] %s %s status=%d cost=%s device=%s source=%s", responderID, r.Method, route, status, latency, deviceID, source)
+		}
+	}
+}
+
 func writeJSON(w http.ResponseWriter, code int, data interface{}) {
+	if object, ok := data.(map[string]interface{}); ok {
+		if source, ok := object["source"].(string); ok {
+			source = strings.TrimSpace(source)
+			if source != "" {
+				w.Header().Set("X-Data-Source", source)
+			}
+		}
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(data)
