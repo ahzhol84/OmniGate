@@ -7,11 +7,13 @@ import (
 	"iot-middleware/pkg/base"
 	"iot-middleware/pkg/common"
 	"iot-middleware/pkg/plugin"
+	"iot-middleware/pkg/realtime"
 	"log"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -19,22 +21,59 @@ import (
 	_ "iot-middleware/plugins/dyf20a_poller"
 	_ "iot-middleware/plugins/generic_http_listener"
 	_ "iot-middleware/plugins/likaan_push_listener"
+	_ "iot-middleware/plugins/onenet_http_push_listener"
 	_ "iot-middleware/plugins/simple_http_responder"
 	_ "iot-middleware/plugins/sxb_poller"
 )
 
 func main() {
 	cfg := loadConfig()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	// 初始化全局资源
 	common.InitRedis(cfg.Global.RedisAddr)
 	common.InitDB(cfg.Global.DBDsn)
 
 	// 数据通道(传送带,暂存100条数据)
-	dataChan := make(chan *base.DeviceData, 100)
+	ingressChan := make(chan *base.DeviceData, 100)
+	writerChan := make(chan *base.DeviceData, 100)
+
+	var wsHub *realtime.Hub
+	var wsHubDone <-chan struct{}
+	wsCfg := cfg.Global.WebSocket
+	if wsCfg.Enabled {
+		wsHub = realtime.NewHub(realtime.Config{
+			Enabled:         wsCfg.Enabled,
+			ListenAddr:      wsCfg.ListenAddr,
+			Path:            wsCfg.Path,
+			AuthHeader:      wsCfg.AuthHeader,
+			AuthToken:       wsCfg.AuthToken,
+			EventBufferSize: wsCfg.EventBufferSize,
+			WriteTimeout:    time.Duration(wsCfg.WriteTimeoutMs) * time.Millisecond,
+		})
+		wsHubDone = wsHub.Done()
+		go wsHub.Start(ctx)
+		log.Printf("✅ 公共 WebSocket Hub 已启用: %s", wsHub.String())
+	} else {
+		log.Printf("⚠️ 公共 WebSocket Hub 未启用")
+	}
+
+	distributorDone := make(chan struct{})
+	go func() {
+		defer close(distributorDone)
+		defer close(writerChan)
+		for data := range ingressChan {
+			if wsHub != nil {
+				wsHub.Publish(data)
+			}
+			writerChan <- data
+		}
+	}()
+
 	writerDone := make(chan struct{})
 	go func() {
-		common.StartDataWriter(dataChan)
+		common.StartDataWriter(writerChan)
 		close(writerDone)
 	}()
 
@@ -80,8 +119,6 @@ func main() {
 	}
 
 	// 启动插件（每个插件一个 goroutine）
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	var workerWG sync.WaitGroup
 
 	log.Printf("🚀 开始启动插件，共 %d 个插件类型...", len(pluginConfigs))
@@ -101,7 +138,7 @@ func main() {
 		workerWG.Add(1)
 		go func(pluginName string, w base.IWorker) {
 			defer workerWG.Done()
-			w.Start(ctx, dataChan)
+			w.Start(ctx, ingressChan)
 			log.Printf("🧹 插件 %s 已退出", pluginName)
 		}(name, worker)
 		log.Printf("✅ 插件 %s 已启动（共 %d 个配置项）", name, len(configs))
@@ -114,7 +151,11 @@ func main() {
 	log.Println("🛑 收到中断信号，正在关闭...")
 	cancel()
 	workerWG.Wait()
-	close(dataChan)
+	close(ingressChan)
+	<-distributorDone
 	<-writerDone
+	if wsHubDone != nil {
+		<-wsHubDone
+	}
 	log.Println("✅ 数据已刷盘，服务已完成优雅退出")
 }

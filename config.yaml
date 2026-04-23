@@ -2,6 +2,14 @@
 global:
   redis_addr: "127.0.0.1:6379"
   db_dsn: "root:xirfdTWg1Gr!A1IJ@tcp(47.94.14.70:3306)/db_name?parseTime=True&loc=Local"
+  websocket:
+    enabled: true
+    listen_addr: ":8088"
+    path: "/ws/events"
+    auth_header: "X-Iot-Token"
+    auth_token: ""
+    event_buffer_size: 1024
+    write_timeout_ms: 2000
 
 plugins:
   # 温湿度传感器插件 - 支持多个设备
@@ -109,29 +117,35 @@ plugins:
         #   - "120.24.56.0/24"
 
   # 立可安回调接收插件（JSON推送）
-  # 设计说明：一个插件一个监听服务；可配多个回调路径，不会按配置启动多个 goroutine
+  # 设计说明：仅负责 HTTP 接收，实时推送由全局 websocket 统一处理
   - name: "likaan_push_listener"
     enabled: true
     configs:
       - listen_addr: ":8086"
         # 立可安当前实际回调为 POST /
         receive_path: "/"
-        websocket_path: "/ws/likaan/alarm"
         compony_name: "立可安"
         device_type: "LIKAAN"
         # 可选：为空表示不校验
         auth_header: "X-Likaan-Token"
         auth_token: ""
-        websocket_auth_header: "X-Likaan-Token"
-        websocket_auth_token: ""
         request_limit_bytes: 1048576
-      - listen_addr: ":8086"
-        receive_path: "/push/likaan/event"
-        websocket_path: "/ws/likaan/alarm"
-        compony_name: "立可安"
-        device_type: "LIKAAN"
-        auth_header: "X-Likaan-Token"
+
+  # OneNET HTTP推送接收插件
+  # - GET: URL验证（回显msg，支持可选token验签）
+  # - POST: 接收设备消息并做JSON解析打印
+  - name: "onenet_http_push_listener"
+    enabled: true
+    configs:
+      - listen_addr: ":8087"
+        receive_path: "/push/onenet"
+        compony_name: "OneNET"
+        device_type: "ONENET"
+        data_type: "ONENET_PUSH"
+        # URL验证：默认不验签，直接200并回显msg，便于先打通
+        enable_token_verify: false
+        verify_token: ""
+        # 可选：若上游会带header鉴权，可配置
+        auth_header: "X-OneNET-Token"
         auth_token: ""
-        websocket_auth_header: "X-Likaan-Token"
-        websocket_auth_token: ""
-        request_limit_bytes: 1048576
+        request_limit_bytes: 2097152
