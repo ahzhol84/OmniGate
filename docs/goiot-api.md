@@ -1,4 +1,4 @@
-# GoIoT 接口文档（登录 / 即时数据 / 历史数据）
+# GoIoT 接口文档（登录 / 即时数据 / 历史数据 / 下行控制）
 
 ## 1. 基本信息
 
@@ -218,3 +218,66 @@ X-Token: <login返回的token>
 - `history_ttl_seconds`：历史分页 Redis TTL（默认 60）
 
 > 建议调用方统一使用 `unique_id` 作为 `device_id` 参数传入。
+
+---
+
+## 7. 设备下行控制（Hub 转发）
+
+### 7.1 接口信息
+
+- 方法：`POST`
+- 路径：`/device/command`
+- 是否鉴权：是（`X-Iot-Token`，与 WebSocket 一致）
+
+### 7.2 请求体
+
+```json
+{
+  "device_id": "string",
+  "request_id": "string",
+  "method": "thing.property.set",
+  "identifier": "power",
+  "params": {
+    "power": 1
+  }
+}
+```
+
+字段说明：
+- `device_id`：目标设备标识（必填）
+- `request_id`：请求 ID（建议传，便于链路追踪）
+- `method`：指令方法（例如 `thing.property.set` / `thing.service.invoke`）
+- `identifier`：属性或服务标识
+- `params`：下发参数
+
+### 7.3 请求示例
+
+```bash
+curl -sS -X POST 'http://127.0.0.1:8088/device/command' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Iot-Token: your_ws_token' \
+  -d '{
+    "device_id":"862288081300541",
+    "request_id":"req-001",
+    "method":"thing.property.set",
+    "identifier":"power",
+    "params":{"power":1}
+  }'
+```
+
+### 7.4 成功响应示例
+
+```json
+{
+  "request_id": "req-001",
+  "code": 0,
+  "message": "ok",
+  "data": {}
+}
+```
+
+### 7.5 失败响应
+
+- `400`：请求体非法 / 缺少 `device_id`
+- `401`：鉴权失败
+- `502`：未找到可处理该设备的插件，或插件执行失败

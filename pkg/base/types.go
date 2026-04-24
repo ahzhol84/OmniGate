@@ -4,6 +4,7 @@ package base
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -28,4 +29,30 @@ type IWorker interface {
 	Init(configs []json.RawMessage) error
 	// Start 启动工作协程，支持多个设备/端口的数据采集
 	Start(ctx context.Context, out chan<- *DeviceData)
+}
+
+// ErrCommandNotSupported 插件不支持下行指令时返回此哨兵错误。
+var ErrCommandNotSupported = errors.New("command not supported by this plugin")
+
+// DeviceCommand 下行指令结构
+type DeviceCommand struct {
+	RequestID  string                 `json:"request_id"`
+	Method     string                 `json:"method"`     // property_set | service_invoke
+	Identifier string                 `json:"identifier"` // 属性/服务标识
+	Params     map[string]interface{} `json:"params"`
+}
+
+// CommandReply 指令回复结构
+type CommandReply struct {
+	RequestID string                 `json:"request_id"`
+	Code      int                    `json:"code"` // 0=成功
+	Message   string                 `json:"message"`
+	Data      map[string]interface{} `json:"data,omitempty"`
+}
+
+// ICommandable 可处理下行指令的插件接口（可选实现，插件按需实现）
+type ICommandable interface {
+	// SendCommand 向指定设备发送指令。
+	// 若设备不属于本插件，必须返回 ErrCommandNotSupported。
+	SendCommand(ctx context.Context, deviceID string, cmd *DeviceCommand) (*CommandReply, error)
 }

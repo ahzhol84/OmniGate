@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iot-middleware/pkg/base"
+	"iot-middleware/pkg/command"
 	"log"
 	"net/http"
 	"strings"
@@ -122,6 +123,7 @@ func (h *Hub) Start(ctx context.Context) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc(h.cfg.Path, h.handleWebSocket)
+	mux.HandleFunc("/device/command", h.handleDeviceCommand)
 
 	h.server = &http.Server{Addr: h.cfg.ListenAddr, Handler: mux}
 
@@ -438,4 +440,52 @@ func matchAuth(req *http.Request, headerName string, expectedToken string) bool 
 // @Author ahzhol
 func (c Config) String() string {
 	return fmt.Sprintf("enabled=%t listen=%s path=%s", c.Enabled, c.ListenAddr, c.Path)
+}
+
+// handleDeviceCommand 处理下行指令 POST /device/command。
+// 请求格式: {"device_id":"xxx","request_id":"xxx","method":"property_set","identifier":"xxx","params":{...}}
+// 鉴权: 与 WebSocket 共用同一 X-Iot-Token。
+// @Author ahzhol
+func (h *Hub) handleDeviceCommand(rw http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(rw, `{"code":-1,"message":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	if !matchAuth(req, h.cfg.AuthHeader, h.cfg.AuthToken) {
+		http.Error(rw, `{"code":-1,"message":"unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+
+	var body struct {
+		DeviceID string `json:"device_id"`
+		base.DeviceCommand
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		http.Error(rw, `{"code":-1,"message":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(body.DeviceID) == "" {
+		http.Error(rw, `{"code":-1,"message":"device_id required"}`, http.StatusBadRequest)
+		return
+	}
+
+	reply, err := command.Dispatch(req.Context(), body.DeviceID, &body.DeviceCommand)
+	if err != nil {
+		log.Printf("[COMMAND] dispatch failed device=%s req=%s err=%v", body.DeviceID, body.RequestID, err)
+		rw.Header().Set("Content-Type", "application/json; charset=utf-8")
+		rw.WriteHeader(http.StatusBadGateway)
+		data, _ := json.Marshal(map[string]interface{}{
+			"code":    -1,
+			"message": err.Error(),
+		})
+		_, _ = rw.Write(data)
+		return
+	}
+
+	log.Printf("[COMMAND] ok device=%s req=%s code=%d", body.DeviceID, body.RequestID, reply.Code)
+	rw.Header().Set("Content-Type", "application/json; charset=utf-8")
+	rw.WriteHeader(http.StatusOK)
+	data, _ := json.Marshal(reply)
+	_, _ = rw.Write(data)
 }

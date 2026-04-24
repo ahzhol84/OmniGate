@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"iot-middleware/pkg/base"
+	"iot-middleware/pkg/command"
 	"iot-middleware/pkg/common"
 	"iot-middleware/pkg/plugin"
 	"iot-middleware/pkg/realtime"
@@ -133,6 +134,12 @@ func main() {
 		if err := worker.Init(configs); err != nil {
 			log.Printf("⚠️ 插件 %s 初始化失败: %v", name, err)
 			continue
+		}
+
+		// 若插件实现了 ICommandable，注册到全局命令路由器
+		if commandable, ok := worker.(base.ICommandable); ok {
+			command.Register(commandable)
+			log.Printf("✅ 插件 %s 已注册命令处理器", name)
 		}
 
 		workerWG.Add(1)
