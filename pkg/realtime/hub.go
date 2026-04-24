@@ -41,6 +41,7 @@ type Hub struct {
 // 入参：cfg 为 Hub 配置。
 // 处理：补齐默认监听地址、路径、鉴权头、缓冲区和写超时；初始化升级器、客户端表、事件通道与完成通道。
 // 出参：返回可直接启动的 Hub 实例。
+// @Author ahzhol
 func NewHub(cfg Config) *Hub {
 	if strings.TrimSpace(cfg.ListenAddr) == "" {
 		cfg.ListenAddr = ":8088"
@@ -115,6 +116,7 @@ func (s subscription) isMatch(data *base.DeviceData) bool {
 // 入参：ctx 为生命周期上下文。
 // 处理：注册路由、创建并启动 HTTP 服务与广播协程；监听 ctx 取消以优雅关停服务并关闭全部客户端。
 // 出参：无。
+// @Author ahzhol
 func (h *Hub) Start(ctx context.Context) {
 	defer close(h.done)
 
@@ -159,6 +161,7 @@ func (h *Hub) String() string {
 // 入参：data 为设备事件数据。
 // 处理：忽略空数据；以非阻塞方式写入事件通道，缓冲区满时丢弃并记录日志。
 // 出参：无。
+// @Author ahzhol
 func (h *Hub) Publish(data *base.DeviceData) {
 	if data == nil {
 		return
@@ -174,6 +177,7 @@ func (h *Hub) Publish(data *base.DeviceData) {
 // 入参：rw 为响应写入器，req 为请求对象。
 // 处理：校验方法与鉴权，升级连接，解析订阅条件并注册客户端，最后启动读循环保持连接活性。
 // 出参：无。
+// @Author ahzhol
 func (h *Hub) handleWebSocket(rw http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodGet {
 		http.Error(rw, "method not allowed", http.StatusMethodNotAllowed)
@@ -206,6 +210,7 @@ func (h *Hub) handleWebSocket(rw http.ResponseWriter, req *http.Request) {
 // 入参：conn 为客户端连接，remote 为远端地址字符串。
 // 处理：持续读取消息以感知连接状态；读取失败时移除客户端、关闭连接并记录断开日志。
 // 出参：无。
+// @Author ahzhol
 func (h *Hub) keepReadLoop(conn *websocket.Conn, remote string) {
 	defer func() {
 		h.removeClient(conn)
@@ -224,6 +229,7 @@ func (h *Hub) keepReadLoop(conn *websocket.Conn, remote string) {
 // 入参：ctx 为生命周期上下文。
 // 处理：循环监听上下文取消或新事件；收到事件后调用广播发送。
 // 出参：无。
+// @Author ahzhol
 func (h *Hub) broadcastLoop(ctx context.Context) {
 	for {
 		select {
@@ -239,6 +245,7 @@ func (h *Hub) broadcastLoop(ctx context.Context) {
 // 入参：data 为设备数据。
 // 处理：构造消息并序列化；筛选匹配客户端后逐个写入；写失败的连接会被移除并关闭。
 // 出参：无。
+// @Author ahzhol
 func (h *Hub) broadcastDeviceData(data *base.DeviceData) {
 	if data == nil {
 		return
@@ -293,6 +300,7 @@ func (h *Hub) broadcastDeviceData(data *base.DeviceData) {
 // 入参：conn 为客户端连接，sub 为订阅条件。
 // 处理：在互斥锁保护下写入客户端映射。
 // 出参：无。
+// @Author ahzhol
 func (h *Hub) addClient(conn *websocket.Conn, sub subscription) {
 	h.clientsMu.Lock()
 	defer h.clientsMu.Unlock()
@@ -303,6 +311,7 @@ func (h *Hub) addClient(conn *websocket.Conn, sub subscription) {
 // 入参：conn 为客户端连接。
 // 处理：在互斥锁保护下从客户端映射中删除该连接。
 // 出参：无。
+// @Author ahzhol
 func (h *Hub) removeClient(conn *websocket.Conn) {
 	h.clientsMu.Lock()
 	defer h.clientsMu.Unlock()
@@ -313,6 +322,7 @@ func (h *Hub) removeClient(conn *websocket.Conn) {
 // 入参：无。
 // 处理：在互斥锁保护下遍历全部连接并关闭，然后从映射中删除。
 // 出参：无。
+// @Author ahzhol
 func (h *Hub) closeAllClients() {
 	h.clientsMu.Lock()
 	defer h.clientsMu.Unlock()
@@ -326,6 +336,7 @@ func (h *Hub) closeAllClients() {
 // 入参：req 为 WebSocket 握手请求。
 // 处理：从查询参数提取 device_type/device_id/unique_id/data_type，分别转换为集合。
 // 出参：返回解析后的订阅对象，空条件字段可能为 nil。
+// @Author ahzhol
 func parseSubscription(req *http.Request) subscription {
 	q := req.URL.Query()
 	return subscription{
@@ -340,6 +351,7 @@ func parseSubscription(req *http.Request) subscription {
 // 入参：value 为逗号分隔文本。
 // 处理：按逗号拆分并去首尾空格，过滤空项后写入集合。
 // 出参：有元素时返回集合；无元素时返回 nil。
+// @Author ahzhol
 func parseSetRaw(value string) map[string]struct{} {
 	items := strings.Split(value, ",")
 	result := make(map[string]struct{})
@@ -360,6 +372,7 @@ func parseSetRaw(value string) map[string]struct{} {
 // 入参：value 为逗号分隔文本。
 // 处理：按逗号拆分、去空格并转换为大写，过滤空项后写入集合。
 // 出参：有元素时返回集合；无元素时返回 nil。
+// @Author ahzhol
 func parseSetUpper(value string) map[string]struct{} {
 	items := strings.Split(value, ",")
 	result := make(map[string]struct{})
@@ -380,6 +393,7 @@ func parseSetUpper(value string) map[string]struct{} {
 // 入参：sub 为订阅对象。
 // 处理：统计各过滤集合数量并拼装为简洁文本；无过滤条件时返回 all。
 // 出参：返回订阅摘要字符串。
+// @Author ahzhol
 func formatSubscription(sub subscription) string {
 	parts := make([]string, 0, 4)
 	if len(sub.deviceTypes) > 0 {
@@ -404,6 +418,7 @@ func formatSubscription(sub subscription) string {
 // 入参：req 为请求对象，headerName 为鉴权头名，expectedToken 为期望令牌。
 // 处理：若未配置期望令牌则直接放行；否则读取请求头并使用常量时间比较避免时序攻击。
 // 出参：校验通过返回 true，否则返回 false。
+// @Author ahzhol
 func matchAuth(req *http.Request, headerName string, expectedToken string) bool {
 	expectedToken = strings.TrimSpace(expectedToken)
 	if expectedToken == "" {
@@ -420,6 +435,7 @@ func matchAuth(req *http.Request, headerName string, expectedToken string) bool 
 // 入参：无。
 // 处理：功能函数，格式化输出启用状态、监听地址和路径。
 // 出参：返回配置摘要字符串。
+// @Author ahzhol
 func (c Config) String() string {
 	return fmt.Sprintf("enabled=%t listen=%s path=%s", c.Enabled, c.ListenAddr, c.Path)
 }
