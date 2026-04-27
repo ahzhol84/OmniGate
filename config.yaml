@@ -142,10 +142,10 @@ plugins:
         compony_name: "OneNET"
         device_type: "ONENET"
         data_type: "ONENET_PUSH"
-        # URL验证：默认不验签，直接200并回显msg，便于先打通
-        enable_token_verify: false
-        verify_token: ""
-        # 可选：若上游会带header鉴权，可配置
-        auth_header: "X-OneNET-Token"
+        # URL验证：OneNET 控制台里的 token 用于 signature 验签，不会直接作为 HTTP header 发送
+        enable_token_verify: true
+        verify_token: "1234"
+        # 推送消息体若未额外附带自定义鉴权头，则这里保持为空；收到真实请求后再按需开启
+        auth_header: "token"
         auth_token: ""
         request_limit_bytes: 2097152
