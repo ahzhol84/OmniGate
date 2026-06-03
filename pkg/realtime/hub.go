@@ -4,16 +4,20 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iot-middleware/pkg/base"
 	"iot-middleware/pkg/command"
+	"iot-middleware/pkg/common"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"gorm.io/gorm"
 )
 
 type Config struct {
@@ -35,6 +39,7 @@ type Hub struct {
 	clients   map[*websocket.Conn]subscription
 
 	events chan *base.DeviceData
+	ready  chan struct{}
 	done   chan struct{}
 }
 
@@ -75,6 +80,7 @@ func NewHub(cfg Config) *Hub {
 		},
 		clients: make(map[*websocket.Conn]subscription),
 		events:  make(chan *base.DeviceData, cfg.EventBufferSize),
+		ready:   make(chan struct{}),
 		done:    make(chan struct{}),
 	}
 }
@@ -124,8 +130,10 @@ func (h *Hub) Start(ctx context.Context) {
 	mux := http.NewServeMux()
 	mux.HandleFunc(h.cfg.Path, h.handleWebSocket)
 	mux.HandleFunc("/device/command", h.handleDeviceCommand)
+	mux.HandleFunc("/device/replay", h.handleReplayByID)
 
 	h.server = &http.Server{Addr: h.cfg.ListenAddr, Handler: mux}
+	close(h.ready)
 
 	go h.broadcastLoop(ctx)
 
@@ -141,6 +149,14 @@ func (h *Hub) Start(ctx context.Context) {
 	if err := h.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Printf("[WS-HUB] server exited with error: %v", err)
 	}
+}
+
+// Ready 返回 Hub 启动就绪信号通道。
+// 入参：无。
+// 处理：功能函数，直接返回内部就绪通道。
+// 出参：返回只读就绪通道，关闭表示 Hub 已完成初始化并开始监听。
+func (h *Hub) Ready() <-chan struct{} {
+	return h.ready
 }
 
 // Done 返回 Hub 停止完成信号通道。
@@ -443,7 +459,8 @@ func (c Config) String() string {
 }
 
 // handleDeviceCommand 处理下行指令 POST /device/command。
-// 请求格式: {"device_id":"xxx","request_id":"xxx","method":"property_set","identifier":"xxx","params":{...}}
+// 请求格式: {"unique_id":"xxx","device_id":"xxx","request_id":"xxx","method":"property_set","identifier":"xxx","params":{...}}
+// 说明: 优先使用 unique_id；若 unique_id 为空则回退 device_id（向后兼容）。
 // 鉴权: 与 WebSocket 共用同一 X-Iot-Token。
 // @Author ahzhol
 func (h *Hub) handleDeviceCommand(rw http.ResponseWriter, req *http.Request) {
@@ -458,34 +475,241 @@ func (h *Hub) handleDeviceCommand(rw http.ResponseWriter, req *http.Request) {
 	}
 
 	var body struct {
+		UniqueID string `json:"unique_id"`
 		DeviceID string `json:"device_id"`
+		PluginID string `json:"plugin_id"`
 		base.DeviceCommand
 	}
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		http.Error(rw, `{"code":-1,"message":"invalid json"}`, http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(body.DeviceID) == "" {
-		http.Error(rw, `{"code":-1,"message":"device_id required"}`, http.StatusBadRequest)
+
+	targetID := strings.TrimSpace(body.UniqueID)
+	if targetID == "" {
+		targetID = strings.TrimSpace(body.DeviceID)
+	}
+	if targetID == "" {
+		http.Error(rw, `{"code":-1,"message":"unique_id or device_id required"}`, http.StatusBadRequest)
 		return
 	}
 
-	reply, err := command.Dispatch(req.Context(), body.DeviceID, &body.DeviceCommand)
+	paramsJSON, _ := json.Marshal(body.Params)
+	pluginID := strings.TrimSpace(body.PluginID)
+	if pluginID == "" && body.Params != nil {
+		if v, ok := body.Params["plugin_id"]; ok {
+			pluginID = strings.TrimSpace(fmt.Sprintf("%v", v))
+		}
+	}
+
+	log.Printf("[COMMAND] request target=%s plugin_id=%s unique_id=%s device_id=%s req=%s method=%s identifier=%s params=%s",
+		targetID,
+		pluginID,
+		strings.TrimSpace(body.UniqueID),
+		strings.TrimSpace(body.DeviceID),
+		strings.TrimSpace(body.RequestID),
+		strings.TrimSpace(body.Method),
+		strings.TrimSpace(body.Identifier),
+		string(paramsJSON),
+	)
+
+	reply, err := command.DispatchWithPlugin(req.Context(), targetID, &body.DeviceCommand, pluginID)
 	if err != nil {
-		log.Printf("[COMMAND] dispatch failed device=%s req=%s err=%v", body.DeviceID, body.RequestID, err)
+		log.Printf("[COMMAND] dispatch failed target=%s plugin_id=%s unique_id=%s device_id=%s req=%s err=%v", targetID, pluginID, strings.TrimSpace(body.UniqueID), strings.TrimSpace(body.DeviceID), body.RequestID, err)
 		rw.Header().Set("Content-Type", "application/json; charset=utf-8")
 		rw.WriteHeader(http.StatusBadGateway)
 		data, _ := json.Marshal(map[string]interface{}{
 			"code":    -1,
 			"message": err.Error(),
+			"target":  targetID,
 		})
 		_, _ = rw.Write(data)
 		return
 	}
 
-	log.Printf("[COMMAND] ok device=%s req=%s code=%d", body.DeviceID, body.RequestID, reply.Code)
+	rawResp := ""
+	if reply != nil && reply.Data != nil {
+		if v, ok := reply.Data["raw"]; ok {
+			rawResp = strings.TrimSpace(fmt.Sprintf("%v", v))
+		}
+	}
+	log.Printf("[COMMAND] ok target=%s plugin_id=%s unique_id=%s device_id=%s req=%s code=%d raw=%s", targetID, pluginID, strings.TrimSpace(body.UniqueID), strings.TrimSpace(body.DeviceID), body.RequestID, reply.Code, rawResp)
 	rw.Header().Set("Content-Type", "application/json; charset=utf-8")
 	rw.WriteHeader(http.StatusOK)
 	data, _ := json.Marshal(reply)
 	_, _ = rw.Write(data)
+}
+
+// handleReplayByID 处理指定 device_data.id 的重播请求 POST /device/replay。
+// 请求格式: {"id":8093}
+// 鉴权: 与 WebSocket 共用同一 X-Iot-Token。
+// @Author ahzhol
+func (h *Hub) handleReplayByID(rw http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(rw, `{"code":-1,"message":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	if !matchAuth(req, h.cfg.AuthHeader, h.cfg.AuthToken) {
+		http.Error(rw, `{"code":-1,"message":"unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+
+	decoder := json.NewDecoder(req.Body)
+	decoder.UseNumber()
+	var body map[string]interface{}
+	if err := decoder.Decode(&body); err != nil {
+		http.Error(rw, `{"code":-1,"message":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+
+	recordID, ok := extractReplayRecordID(body)
+	if !ok {
+		http.Error(rw, `{"code":-1,"message":"id required"}`, http.StatusBadRequest)
+		return
+	}
+
+	data, err := loadDeviceDataByID(recordID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			http.Error(rw, `{"code":-1,"message":"record not found"}`, http.StatusNotFound)
+			return
+		}
+		log.Printf("[WS-HUB] replay load failed id=%d err=%v", recordID, err)
+		http.Error(rw, `{"code":-1,"message":"load record failed"}`, http.StatusInternalServerError)
+		return
+	}
+
+	h.Publish(data)
+	log.Printf("[WS-HUB] replay published id=%d device_id=%s unique_id=%s data_type=%s", recordID, data.DeviceID, data.UniqueID, data.DataType)
+
+	rw.Header().Set("Content-Type", "application/json; charset=utf-8")
+	rw.WriteHeader(http.StatusOK)
+	resp, _ := json.Marshal(map[string]interface{}{
+		"code":      0,
+		"message":   "ok",
+		"id":        recordID,
+		"device_id": data.DeviceID,
+		"unique_id": data.UniqueID,
+		"data_type": data.DataType,
+	})
+	_, _ = rw.Write(resp)
+}
+
+// extractReplayRecordID 从请求体中提取重播记录ID。
+// 入参：body map[string]interface{} 请求体，不可为空
+// 处理过程：按 id/record_id/data_id 依次尝试解析为正整数
+// 出参：uint64 记录ID；bool 是否成功
+// @Author ahzhol
+func extractReplayRecordID(body map[string]interface{}) (uint64, bool) {
+	for _, key := range []string{"id", "record_id", "data_id"} {
+		if raw, exists := body[key]; exists {
+			if id, ok := toUint64(raw); ok {
+				return id, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// toUint64 将任意JSON值转换为正整数ID。
+// 入参：value interface{} 值，可为空
+// 处理过程：支持 json.Number/string/int/float 等常见类型解析
+// 出参：uint64 转换后的ID；bool 是否成功
+// @Author ahzhol
+func toUint64(value interface{}) (uint64, bool) {
+	if value == nil {
+		return 0, false
+	}
+	switch v := value.(type) {
+	case json.Number:
+		iv, err := strconv.ParseUint(strings.TrimSpace(v.String()), 10, 64)
+		if err != nil || iv == 0 {
+			return 0, false
+		}
+		return iv, true
+	case string:
+		iv, err := strconv.ParseUint(strings.TrimSpace(v), 10, 64)
+		if err != nil || iv == 0 {
+			return 0, false
+		}
+		return iv, true
+	case int:
+		if v <= 0 {
+			return 0, false
+		}
+		return uint64(v), true
+	case int32:
+		if v <= 0 {
+			return 0, false
+		}
+		return uint64(v), true
+	case int64:
+		if v <= 0 {
+			return 0, false
+		}
+		return uint64(v), true
+	case float32:
+		if v <= 0 {
+			return 0, false
+		}
+		return uint64(v), true
+	case float64:
+		if v <= 0 {
+			return 0, false
+		}
+		return uint64(v), true
+	default:
+		s := strings.TrimSpace(fmt.Sprintf("%v", value))
+		iv, err := strconv.ParseUint(s, 10, 64)
+		if err != nil || iv == 0 {
+			return 0, false
+		}
+		return iv, true
+	}
+}
+
+// loadDeviceDataByID 根据 device_data.id 读取一条设备数据。
+// 入参：recordID uint64 记录ID，需大于0
+// 处理过程：从数据库查询该记录并映射为 base.DeviceData
+// 出参：*base.DeviceData 设备数据；error 错误信息
+// @Author ahzhol
+func loadDeviceDataByID(recordID uint64) (*base.DeviceData, error) {
+	if recordID == 0 {
+		return nil, fmt.Errorf("record id is empty")
+	}
+	if common.DB == nil {
+		return nil, fmt.Errorf("database unavailable")
+	}
+
+	var row struct {
+		DeviceID    string    `gorm:"column:device_id"`
+		UniqueID    string    `gorm:"column:unique_id"`
+		DeviceType  string    `gorm:"column:device_type"`
+		Timestamp   time.Time `gorm:"column:timestamp"`
+		Payload     []byte    `gorm:"column:payload"`
+		ComponyName string    `gorm:"column:compony_name"`
+		DataType    string    `gorm:"column:data_type"`
+	}
+	if err := common.DB.Table("device_data").
+		Select("device_id", "unique_id", "device_type", "timestamp", "payload", "compony_name", "data_type").
+		Where("id = ?", recordID).
+		Take(&row).Error; err != nil {
+		return nil, err
+	}
+
+	uniqueID := strings.TrimSpace(row.UniqueID)
+	if uniqueID == "" {
+		uniqueID = strings.TrimSpace(row.DeviceID)
+	}
+
+	return &base.DeviceData{
+		DeviceID:    strings.TrimSpace(row.DeviceID),
+		UniqueID:    uniqueID,
+		DeviceType:  strings.TrimSpace(row.DeviceType),
+		Timestamp:   row.Timestamp,
+		Payload:     json.RawMessage(row.Payload),
+		ComponyName: strings.TrimSpace(row.ComponyName),
+		DataType:    strings.TrimSpace(row.DataType),
+	}, nil
 }

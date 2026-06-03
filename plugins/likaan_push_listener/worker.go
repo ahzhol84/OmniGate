@@ -10,6 +10,7 @@ import (
 	"iot-middleware/pkg/plugin"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -35,12 +36,7 @@ type pushPayload struct {
 	DevInfo     struct {
 		DevID string `json:"devId"`
 	} `json:"devInfo"`
-	IotMsg struct {
-		CreateTime int64       `json:"createTime"`
-		DevID      string      `json:"devId"`
-		MsgType    interface{} `json:"msgType"`
-		MsgDesc    string      `json:"msgDesc"`
-	} `json:"iotMsg"`
+	IotMsg map[string]interface{} `json:"iotMsg"`
 }
 
 func (w *Worker) Init(configs []json.RawMessage) error {
@@ -157,14 +153,18 @@ func (w *Worker) buildHandler(cfg ConfigItem, out chan<- *base.DeviceData) http.
 
 		devID := strings.TrimSpace(incoming.DevInfo.DevID)
 		if devID == "" {
-			devID = strings.TrimSpace(incoming.IotMsg.DevID)
+			devID = strings.TrimSpace(getStringValue(incoming.IotMsg["devId"]))
 		}
 		if devID == "" {
 			http.Error(rw, "devInfo.devId or iotMsg.devId is required", http.StatusBadRequest)
 			return
 		}
 
-		msgType := normalizeDataType(incoming.IotMsg.MsgType)
+		if devID == "866960079840045" {
+			log.Printf("[LIKAAN] raw push devId=%s body=%s", devID, string(body))
+		}
+
+		msgType := normalizeDataType(incoming.IotMsg["msgType"])
 		if msgType == "" {
 			msgType = normalizeDataType(incoming.DeviceMsgID)
 		}
@@ -173,13 +173,13 @@ func (w *Worker) buildHandler(cfg ConfigItem, out chan<- *base.DeviceData) http.
 		}
 
 		ts := time.Now()
-		if incoming.IotMsg.CreateTime > 0 {
-			if candidate := time.UnixMilli(incoming.IotMsg.CreateTime); !candidate.IsZero() {
+		if createTimeMillis := extractCreateTimeMillis(incoming.IotMsg); createTimeMillis > 0 {
+			if candidate := time.UnixMilli(createTimeMillis); !candidate.IsZero() {
 				ts = candidate
 			}
 		}
 
-		filteredPayload, err := buildFilteredIotMsgPayload(incoming, devID, msgType)
+		filteredPayload, err := buildForwardIotMsgPayload(incoming.IotMsg, devID, msgType)
 		if err != nil {
 			http.Error(rw, "build payload failed", http.StatusBadRequest)
 			return
@@ -208,36 +208,74 @@ func (w *Worker) buildHandler(cfg ConfigItem, out chan<- *base.DeviceData) http.
 	}
 }
 
-func buildFilteredIotMsgPayload(incoming pushPayload, fallbackDevID string, normalizedMsgType string) (json.RawMessage, error) {
-	devID := strings.TrimSpace(incoming.IotMsg.DevID)
-	if devID == "" {
-		devID = fallbackDevID
+func buildForwardIotMsgPayload(iotMsg map[string]interface{}, fallbackDevID string, normalizedMsgType string) (json.RawMessage, error) {
+	if iotMsg == nil {
+		return nil, fmt.Errorf("iotMsg is required")
 	}
 
-	msgDesc := strings.TrimSpace(incoming.IotMsg.MsgDesc)
-	msgType := incoming.IotMsg.MsgType
-	if normalizeDataType(msgType) == "" {
-		msgType = normalizedMsgType
+	forward := make(map[string]interface{}, len(iotMsg)+2)
+	for key, value := range iotMsg {
+		forward[key] = value
 	}
 
-	filtered := struct {
-		CreateTime int64       `json:"createTime"`
-		DevID      string      `json:"devId"`
-		MsgType    interface{} `json:"msgType"`
-		MsgDesc    string      `json:"msgDesc"`
-	}{}
+	if strings.TrimSpace(getStringValue(forward["devId"])) == "" {
+		forward["devId"] = fallbackDevID
+	}
+	if normalizeDataType(forward["msgType"]) == "" {
+		forward["msgType"] = normalizedMsgType
+	}
 
-	filtered.CreateTime = incoming.IotMsg.CreateTime
-	filtered.DevID = devID
-	filtered.MsgType = msgType
-	filtered.MsgDesc = msgDesc
-
-	data, err := json.Marshal(filtered)
+	data, err := json.Marshal(forward)
 	if err != nil {
 		return nil, err
 	}
 
 	return json.RawMessage(data), nil
+}
+
+func getStringValue(value interface{}) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprintf("%v", value))
+}
+
+func extractCreateTimeMillis(iotMsg map[string]interface{}) int64 {
+	if iotMsg == nil {
+		return 0
+	}
+
+	value, ok := iotMsg["createTime"]
+	if !ok || value == nil {
+		return 0
+	}
+
+	switch v := value.(type) {
+	case float64:
+		return int64(v)
+	case float32:
+		return int64(v)
+	case int:
+		return int64(v)
+	case int64:
+		return v
+	case int32:
+		return int64(v)
+	case json.Number:
+		n, err := v.Int64()
+		if err != nil {
+			return 0
+		}
+		return n
+	case string:
+		n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		if err != nil {
+			return 0
+		}
+		return n
+	default:
+		return 0
+	}
 }
 
 func matchAuth(req *http.Request, headerName string, expectedToken string) bool {

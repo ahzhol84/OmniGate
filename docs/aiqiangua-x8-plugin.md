@@ -37,6 +37,10 @@
 - `path_prefix`：可选分路径入口前缀，支持如 `/push/aiqiangua/x8/location`。
 - `device_type`：写入 `device_data.device_type`。
 - `allowed_ips`：可选 IP 白名单，支持单 IP 或 CIDR。
+- `api_base_url`：爱牵挂平台地址，默认 `http://api.aiqiangua.com:8888`。
+- `username` / `password`：爱牵挂平台登录账号密码（用于下行接口登录）。
+- `network_type`：设备网络类型，默认 `4g`。
+- `sos_index`：默认紧急联系人槽位（1-10），默认 `1`。
 
 ---
 
@@ -139,7 +143,70 @@
 
 ---
 
-## 7. 代码位置
+## 7. 下行指令（设置紧急联系人）
+
+插件已支持通过 Hub 的 `/device/command` 转发到爱牵挂接口：
+
+1. 登录：`POST /api/auth/login`
+2. 设置联系人：`POST /api/device/{device_id}/{network_type}/sos_numbers/{index}/`
+
+参数映射：
+
+- `name`：联系人名字（必填）
+- `num`：联系人电话（必填）
+- `dial_flag`：拨号标记，默认 `1`
+- `network_type`：可选，不传时取配置
+- `sos_index/index/slot`：可选，不传时取配置
+
+设备标识说明：
+
+- Hub 传入的 `device_id` 可以是厂商设备号（IMEI）或业务侧 `unique_id`。
+- 当传入 `unique_id` 时，插件会先从 `device_data` 表按 `unique_id` 反查最近一条记录，解析真实设备号后再调用爱牵挂下行接口。
+- 若无法反查到真实设备号，会返回失败并提示 `cannot resolve unique_id`。
+
+清空联系人槽位（删除效果）：
+
+- 爱牵挂当前接口是“覆盖写入”，未提供单独删除接口时，可用清空方式实现删除效果。
+- 方式一：`params.clear=true`（或 `remove=true` / `delete=true`）
+- 方式二：`identifier=sos_numbers_clear`（或 `sos_numbers_delete`）
+- 清空时插件会提交 `name=""`、`num=""`、`dial_flag=0`。
+
+建议下行请求示例（Hub 层）：
+
+```json
+{
+  "device_id": "866117051455595",
+  "request_id": "req-sos-001",
+  "method": "property_set",
+  "identifier": "sos_numbers",
+  "params": {
+    "name": "Redemption",
+    "num": "13238699393",
+    "dial_flag": 1,
+    "sos_index": 1,
+    "network_type": "4g"
+  }
+}
+```
+
+清空槽位示例：
+
+```json
+{
+  "device_id": "jlk|aiqiangua_x8|AIQIANGUA_X8|866117051455595",
+  "request_id": "req-sos-clear-001",
+  "method": "property_set",
+  "identifier": "sos_numbers",
+  "params": {
+    "sos_index": 1,
+    "clear": true
+  }
+}
+```
+
+---
+
+## 8. 代码位置
 
 - 插件实现：`plugins/aiqiangua_x8/worker.go`
 - 插件注册：`cmd/server/main.go`（空导入）

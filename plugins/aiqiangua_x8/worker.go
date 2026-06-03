@@ -18,6 +18,8 @@ import (
 	"time"
 )
 
+const maxTimeBeginLength = 19
+
 type ConfigItem struct {
 	ComponyName  string   `json:"compony_name"`
 	ListenAddr   string   `json:"listen_addr"`
@@ -26,11 +28,18 @@ type ConfigItem struct {
 	DeviceType   string   `json:"device_type"`
 	UniquePrefix string   `json:"unique_prefix"`
 	AllowedIPs   []string `json:"allowed_ips"`
+	APIBaseURL   string   `json:"api_base_url"`
+	Username     string   `json:"username"`
+	Password     string   `json:"password"`
+	NetworkType  string   `json:"network_type"`
+	SOSIndex     int      `json:"sos_index"`
 }
 
 type Worker struct {
-	configs []ConfigItem
-	servers []*http.Server
+	configs          []ConfigItem
+	servers          []*http.Server
+	commandSessionMu sync.RWMutex
+	commandSessions  map[string]*commandSession
 }
 
 // Init 初始化插件配置。
@@ -59,9 +68,18 @@ func (w *Worker) Init(configs []json.RawMessage) error {
 		if strings.TrimSpace(cfg.DeviceType) == "" {
 			cfg.DeviceType = "AIQIANGUA_X8"
 		}
+		if strings.TrimSpace(cfg.APIBaseURL) == "" {
+			cfg.APIBaseURL = "http://api.aiqiangua.com:8888"
+		}
+		if strings.TrimSpace(cfg.NetworkType) == "" {
+			cfg.NetworkType = "4g"
+		}
+		if cfg.SOSIndex <= 0 {
+			cfg.SOSIndex = 1
+		}
 
 		w.configs = append(w.configs, cfg)
-		log.Printf("[AIQG-X8] config[%d] listen=%s receive_path=%s path_prefix=%s", i+1, cfg.ListenAddr, cfg.ReceivePath, cfg.PathPrefix)
+		log.Printf("[AIQG-X8] config[%d] listen=%s receive_path=%s path_prefix=%s api_base=%s", i+1, cfg.ListenAddr, cfg.ReceivePath, cfg.PathPrefix, cfg.APIBaseURL)
 	}
 	return nil
 }
@@ -189,13 +207,13 @@ func (w *Worker) handlePush(rw http.ResponseWriter, req *http.Request, out chan<
 	physicalKey := buildPhysicalKey(reportedDeviceType, deviceIMEI)
 	logicalKey := buildLogicalKey(physicalKey, eventType)
 
-	deviceID := common.ResolveDeviceUniqueID(
-		fmt.Sprintf("%s|%s", resolvedUniquePrefix, physicalKey),
-		cfg.ComponyName,
-		"aiqiangua_x8",
-		reportedDeviceType,
-		deviceSourceID,
-	)
+	deviceID := normalizeIdentityPart(values["imei"])
+	if deviceID == "" {
+		deviceID = normalizeIdentityPart(deviceIMEI)
+	}
+	if deviceID == "" {
+		deviceID = "unknown"
+	}
 
 	uniqueID := common.ResolveDeviceUniqueID(
 		fmt.Sprintf("%s|%s", resolvedUniquePrefix, logicalKey),
@@ -232,12 +250,18 @@ func (w *Worker) handlePush(rw http.ResponseWriter, req *http.Request, out chan<
 		ComponyName: cfg.ComponyName,
 	}
 
+	if looksLikeVendorDeviceID(deviceID) {
+		if err := common.UpsertDeviceIDMapping("aiqiangua_x8", uniqueID, deviceID, cfg.ComponyName, reportedDeviceType, eventType); err != nil {
+			log.Printf("[AIQG-X8-%d] mapping upsert failed unique=%s device=%s err=%v", workerIndex, uniqueID, deviceID, err)
+		}
+	}
+
 	select {
 	case out <- data:
 		rw.Header().Set("Content-Type", "application/json; charset=utf-8")
 		rw.WriteHeader(http.StatusOK)
 		_, _ = rw.Write([]byte(`{"code":0,"msg":"ok"}`))
-		log.Printf("[AIQG-X8-%d] recv event=%s imei=%s device_id=%s unique=%s", workerIndex, eventType, deviceSourceID, deviceID, uniqueID)
+		log.Printf("[AIQG-X8-%d] recv event=%s imei=%s device_id=%s unique=%s ip=%s", workerIndex, eventType, deviceSourceID, deviceID, uniqueID, remoteIP)
 	case <-time.After(3 * time.Second):
 		http.Error(rw, "busy", http.StatusServiceUnavailable)
 		log.Printf("[AIQG-X8-%d] channel busy, drop event=%s imei=%s", workerIndex, eventType, deviceSourceID)
@@ -246,7 +270,7 @@ func (w *Worker) handlePush(rw http.ResponseWriter, req *http.Request, out chan<
 
 // buildPayload 根据事件类型构建上报 payload。
 // 入参：eventType 为事件类型，values 为表单字段，deviceIMEI 为设备 IMEI，eventTime 为事件时间。
-// 处理：按事件白名单字段提取值并做必要转换（如 heartrate 数值化、time_begin 回填）。
+// 处理：按事件白名单字段提取值并做必要转换（如 heartrate 数值化）；时间字段保持原始值。
 // 出参：返回 payload 对象与是否保留该事件；不支持或无有效字段时返回 (nil, false)。
 func buildPayload(eventType string, values map[string]string, deviceIMEI string, eventTime time.Time) (map[string]interface{}, bool) {
 	allowed := map[string][]string{
@@ -256,6 +280,7 @@ func buildPayload(eventType string, values map[string]string, deviceIMEI string,
 		"SLEEP":               {"awake_time", "deep_sleep", "imei", "light_sleep", "time_begin", "time_end", "total_sleep"},
 		"STEP":                {"imei", "step_number_value", "time_begin"},
 		"HEART_RATE":          {"heartrate", "imei", "time_begin"},
+		"SOS":                 {"address", "city", "heartrate", "imei", "lat", "lon", "time_begin"},
 		"LOCATION":            {"address", "city", "imei", "lat", "lon", "time_begin"},
 	}
 
@@ -272,10 +297,8 @@ func buildPayload(eventType string, values map[string]string, deviceIMEI string,
 				payload["imei"] = imei
 			}
 		case "time_begin":
-			if raw := strings.TrimSpace(values["time_begin"]); raw != "" {
-				payload["time_begin"] = raw
-			} else if !eventTime.IsZero() {
-				payload["time_begin"] = eventTime.Format("2006-01-02 15:04:05")
+			if normalized := normalizeTimeBegin(values["time_begin"]); normalized != "" {
+				payload["time_begin"] = normalized
 			}
 		case "heartrate":
 			raw := strings.TrimSpace(values["heartrate"])
@@ -298,6 +321,35 @@ func buildPayload(eventType string, values map[string]string, deviceIMEI string,
 		return nil, false
 	}
 	return payload, true
+}
+
+// normalizeTimeBegin 规范化 time_begin 字段，确保格式和长度可控。
+// 入参：raw 为原始 time_begin 字符串。
+// 处理：优先按常见时间格式解析并统一为 yyyy-MM-dd HH:mm:ss；解析失败时做长度截断保护。
+// 出参：返回可下发的 time_begin；空值返回空字符串。
+func normalizeTimeBegin(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+
+	layouts := []string{
+		time.RFC3339,
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05.999999",
+		"2006-01-02 15:04:05",
+		"2006/01/02 15:04:05",
+	}
+	for _, layout := range layouts {
+		if t, err := time.ParseInLocation(layout, raw, time.Local); err == nil {
+			return t.Format("2006-01-02 15:04:05")
+		}
+	}
+
+	if len(raw) > maxTimeBeginLength {
+		return raw[:maxTimeBeginLength]
+	}
+	return raw
 }
 
 // parseForm 解析请求表单数据。
@@ -556,6 +608,7 @@ func parseEventTime(form map[string]string) time.Time {
 
 		layouts := []string{
 			time.RFC3339,
+			"2006-01-02 15:04:05.999999",
 			"2006-01-02 15:04:05",
 			"2006/01/02 15:04:05",
 		}

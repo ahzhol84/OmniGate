@@ -40,6 +40,11 @@ func InitDB(dns string) {
 	}
 	DB = db
 	fmt.Println("✅ 数据库连接成功")
+	if err := EnsureDeviceIDMappingTable(); err != nil {
+		log.Printf("[MAPPING] ensure table failed: %v", err)
+	} else {
+		log.Printf("[MAPPING] table ready")
+	}
 	migrateLegacyDeviceIDs()
 }
 

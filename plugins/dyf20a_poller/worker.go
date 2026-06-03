@@ -200,7 +200,7 @@ func (w *DYF20AWorker) fetch(DeviceID string, auth *TokenManager, componyName st
 		log.Printf("[FETCH] 读取响应失败: %v", err)
 		return nil, err
 	}
-	log.Printf("[FETCH] 原始响应: %s", string(bodyBytes))
+	// log.Printf("[FETCH] 原始响应: %s", string(bodyBytes))
 
 	var raw map[string]interface{}
 	if err := json.Unmarshal(bodyBytes, &raw); err != nil {

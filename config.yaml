@@ -111,6 +111,12 @@ plugins:
         # 可选：同时支持 /push/aiqiangua/x8/location 等路径
         path_prefix: "/push/aiqiangua/x8"
         device_type: "AIQIANGUA_X8"
+        # 下行控制（紧急联系人）配置
+        api_base_url: "http://api.aiqiangua.com:8888"
+        username: "17635180876"
+        password: "123456"
+        network_type: "4g"
+        sos_index: 1
         # 可选：按来源IP做白名单（支持单IP与CIDR）
         # allowed_ips:
         #   - "120.24.56.48"
@@ -131,6 +137,23 @@ plugins:
         auth_token: ""
         request_limit_bytes: 1048576
 
+  # 电信CTWing AEP平台设备数据订阅推送接收插件
+  # 推送地址：http://47.94.14.70:8089/push/ctwing
+  # 仅处理 topic=v1/up/ad19prof 的设备数据变化通知，其余静默丢弃
+  - name: "ctwing_aep_push_listener"
+    enabled: true
+    configs:
+      - listen_addr: ":8089"
+        receive_path: "/push/ctwing"
+        compony_name: "电信CTWing"
+        device_type: "CTWING"
+        # 仅接收该 topic 的推送，其余回200丢弃
+        allowed_topic: "v1/up/ad19prof"
+        # 可选：CTWing平台推送如带自定义鉴权头则填写，否则留空
+        auth_header: "Authorization"
+        auth_token: ""
+        request_limit_bytes: 2097152
+
   # OneNET HTTP推送接收插件
   # - GET: URL验证（回显msg，支持可选token验签）
   # - POST: 接收设备消息并做JSON解析打印
@@ -142,6 +165,12 @@ plugins:
         compony_name: "OneNET"
         device_type: "ONENET"
         data_type: "ONENET_PUSH"
+        # 下行反控（/device/command）所需鉴权配置
+        cmiot_user_id: "511932"
+        cmiot_access_key: "720e323b10d54d3a8cdbe5dd4e641052"
+        cmiot_product_id: "5POpr2bk2g"
+        cmiot_sign_method: "sha1"
+        command_timeout_seconds: 10
         # URL验证：OneNET 控制台里的 token 用于 signature 验签，不会直接作为 HTTP header 发送
         enable_token_verify: true
         verify_token: "1234"
@@ -149,3 +178,55 @@ plugins:
         auth_header: "token"
         auth_token: ""
         request_limit_bytes: 2097152
+
+  # 教学插件脚手架（演示“新插件如何写”）
+  # 功能：
+  # 1) 上行：接收 POST /push/teaching 并写入统一 DeviceData 通道
+  # 2) 下行：实现 SendCommand 的设备认领与回包模板
+  # 说明：默认关闭。课堂演示时开启即可，不影响现有业务插件。
+  - name: "teaching_device_scaffold"
+    enabled: false
+    configs:
+      - listen_addr: ":8099"
+        receive_path: "/push/teaching"
+        compony_name: "教学演示"
+        device_type: "TEACHING_DEVICE"
+        data_type: "TEACHING_UPLINK"
+        auth_header: "X-Iot-Token"
+        auth_token: ""
+        # 反控认领用：当 /device/command 的 device_id 命中以下任一值，本插件会认领并返回教学回包
+        demo_device_id: "TEACHING_DEVICE_001"
+        demo_unique_id: "teaching|scaffold|TEACHING_DEVICE|001"
+
+  # 紫兴智能家居反控插件（开关/窗帘/门锁）
+  - name: "zixing_smart_home"
+    enabled: true
+    configs:
+      - base_url: "http://43.143.186.19"
+        account: "ID6OTSOCLH5W24U0RE"
+        password: "123456"
+        timeout_seconds: 60
+        claim_prefixes:
+          - "zixing|"
+          - "zx|"
+
+  - name: "shanghai_xikali"
+    enabled: true
+    configs:
+      - host: "iot-010a0clt.amqp.iothub.aliyuncs.com"
+        port: 5671
+        iot_instance_id: "iot-010a0clt"
+        consumer_group_id: "lGIkek58uHzjqRaDUif6000110"
+        client_id: "go-amqp-xikali-001"
+        sign_method: "hmacsha1"
+        access_key: "${ALIBABA_CLOUD_ACCESS_KEY_ID}"
+        access_secret: "${ALIBABA_CLOUD_ACCESS_KEY_SECRET}"
+        link_credit: 200
+        reconnect_max_wait: 20
+        insecure_skip_verify: true
+        compony_name: "上海希卡利"
+        device_type: "SHANGHAI_XIKALI"
+        data_type: "ALIYUN_AMQP"
+        unique_prefix: "xkl"
+        allowed_nicknames:
+          - "X1LTE_S01B03N127"

@@ -20,17 +20,22 @@ import (
 )
 
 type ConfigItem struct {
-	ListenAddr         string `json:"listen_addr"`
-	ReceivePath        string `json:"receive_path"`
-	ComponyName        string `json:"compony_name"`
-	DeviceType         string `json:"device_type"`
-	DataType           string `json:"data_type"`
-	VerifyToken        string `json:"verify_token"`
-	EnableTokenVerify  bool   `json:"enable_token_verify"`
-	AuthHeader         string `json:"auth_header"`
-	AuthToken          string `json:"auth_token"`
-	RequestLimit       int64  `json:"request_limit_bytes"`
-	ResponseOnVerified string `json:"response_on_verified"`
+	ListenAddr            string `json:"listen_addr"`
+	ReceivePath           string `json:"receive_path"`
+	ComponyName           string `json:"compony_name"`
+	DeviceType            string `json:"device_type"`
+	DataType              string `json:"data_type"`
+	CMiotUserID           string `json:"cmiot_user_id"`
+	CMiotAccessKey        string `json:"cmiot_access_key"`
+	CMiotProductID        string `json:"cmiot_product_id"`
+	CMiotSignMethod       string `json:"cmiot_sign_method"`
+	CommandTimeoutSeconds int    `json:"command_timeout_seconds"`
+	VerifyToken           string `json:"verify_token"`
+	EnableTokenVerify     bool   `json:"enable_token_verify"`
+	AuthHeader            string `json:"auth_header"`
+	AuthToken             string `json:"auth_token"`
+	RequestLimit          int64  `json:"request_limit_bytes"`
+	ResponseOnVerified    string `json:"response_on_verified"`
 }
 
 type Worker struct {
@@ -75,6 +80,12 @@ func (w *Worker) Init(configs []json.RawMessage) error {
 		}
 		if cfg.RequestLimit <= 0 {
 			cfg.RequestLimit = 2 << 20
+		}
+		if strings.TrimSpace(cfg.CMiotSignMethod) == "" {
+			cfg.CMiotSignMethod = "sha1"
+		}
+		if cfg.CommandTimeoutSeconds <= 0 {
+			cfg.CommandTimeoutSeconds = 10
 		}
 
 		if prev, exists := pathIndex[cfg.ReceivePath]; exists {
@@ -210,7 +221,7 @@ func (w *Worker) handlePushData(rw http.ResponseWriter, req *http.Request, cfg C
 	}
 
 	var payloadObj map[string]interface{}
-	if err := json.Unmarshal(body, &payloadObj); err != nil {
+	if err := decodeJSONToMap(body, &payloadObj); err != nil {
 		http.Error(rw, "invalid json body", http.StatusBadRequest)
 		return
 	}
@@ -224,14 +235,8 @@ func (w *Worker) handlePushData(rw http.ResponseWriter, req *http.Request, cfg C
 		log.Printf("[ONENET] parsed inner msg path=%s remote=%s msg=\n%s", cfg.ReceivePath, req.RemoteAddr, string(prettyInner))
 	}
 
-	flatPayloadObj := flattenPayload(payloadObj, innerMsgObj, hasInner)
-	flatPayload, err := json.Marshal(flatPayloadObj)
-	if err != nil {
-		http.Error(rw, "flatten payload failed", http.StatusBadRequest)
-		return
-	}
-	prettyFlat, _ := json.MarshalIndent(flatPayloadObj, "", "  ")
-	log.Printf("[ONENET] flattened payload path=%s remote=%s payload=\n%s", cfg.ReceivePath, req.RemoteAddr, string(prettyFlat))
+	// 按需保留原始上报 JSON，便于上层按消息原貌做分类统计。
+	rawPayload := json.RawMessage(body)
 
 	deviceID := pickFirstNonEmpty(payloadObj, "device_id", "deviceId", "devId", "imei", "sn")
 	if deviceID == "" && hasInner {
@@ -239,6 +244,20 @@ func (w *Worker) handlePushData(rw http.ResponseWriter, req *http.Request, cfg C
 	}
 	if deviceID == "" {
 		deviceID = "UNKNOWN_ONENET_DEVICE"
+	}
+
+	alarmValue, ok := extractNestedField(innerMsgObj, "data", "params", "press_alarm", "value", "alarm")
+	if !ok {
+		alarmValue, ok = extractNestedField(payloadObj, "data", "params", "press_alarm", "value", "alarm")
+	}
+	if ok && isZeroValue(alarmValue) {
+		if simplifiedPayload, err := json.Marshal(map[string]interface{}{
+			"alarm":     alarmValue,
+			"unique_id": deviceID,
+		}); err == nil {
+			rawPayload = json.RawMessage(simplifiedPayload)
+			log.Printf("[ONENET] press_alarm simplified path=%s remote=%s unique_id=%s alarm=%v", cfg.ReceivePath, req.RemoteAddr, deviceID, alarmValue)
+		}
 	}
 
 	dataType := strings.TrimSpace(cfg.DataType)
@@ -251,7 +270,7 @@ func (w *Worker) handlePushData(rw http.ResponseWriter, req *http.Request, cfg C
 		UniqueID:    deviceID,
 		DeviceType:  strings.TrimSpace(cfg.DeviceType),
 		Timestamp:   time.Now(),
-		Payload:     json.RawMessage(flatPayload),
+		Payload:     rawPayload,
 		ComponyName: strings.TrimSpace(cfg.ComponyName),
 		DataType:    dataType,
 	}
@@ -348,7 +367,7 @@ func parseInnerMsg(payload map[string]interface{}) (map[string]interface{}, bool
 			return nil, false
 		}
 		var inner map[string]interface{}
-		if err := json.Unmarshal([]byte(trimmed), &inner); err != nil {
+		if err := decodeJSONToMap([]byte(trimmed), &inner); err != nil {
 			return nil, false
 		}
 		return inner, true
@@ -356,6 +375,42 @@ func parseInnerMsg(payload map[string]interface{}) (map[string]interface{}, bool
 		return typed, true
 	default:
 		return nil, false
+	}
+}
+
+// extractNestedField 按顺序读取嵌套字段，任一层缺失则返回 false。
+func extractNestedField(payload map[string]interface{}, keys ...string) (interface{}, bool) {
+	current := interface{}(payload)
+	for _, key := range keys {
+		m, ok := current.(map[string]interface{})
+		if !ok {
+			return nil, false
+		}
+		value, exists := m[key]
+		if !exists {
+			return nil, false
+		}
+		current = value
+	}
+	return current, true
+}
+
+// decodeJSONToMap 使用 json.Decoder 的 UseNumber 解析 JSON，避免数字被直接转成 float64。
+func decodeJSONToMap(data []byte, target *map[string]interface{}) error {
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.UseNumber()
+	return decoder.Decode(target)
+}
+
+// isZeroValue 判断值是否等于 0，仅兼容 int 类型。
+func isZeroValue(value interface{}) bool {
+	switch v := value.(type) {
+	case int:
+		return v == 0
+	case json.Number:
+		return v.String() == "0"
+	default:
+		return false
 	}
 }
 

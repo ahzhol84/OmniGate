@@ -2,7 +2,7 @@
 
 ## 1. 基本信息
 
-- 服务地址：`http://127.0.0.1:8081`
+- 服务地址：`http://47.94.14.70:8081`
 - 鉴权方式：`X-Token` 请求头
 - Content-Type：`application/json`
 
@@ -36,7 +36,7 @@
 ### 2.4 请求示例
 
 ```bash
-curl -sS -X POST 'http://127.0.0.1:8081/login' \
+curl -sS -X POST 'http://47.94.14.70:8081/login' \
   -H 'Content-Type: application/json' \
   -d '{"credential":"a3pjRHw1fbvQNNiwSjFnT029p4y4gCjnd7V85W/751M="}'
 ```
@@ -77,7 +77,7 @@ curl -sS -X POST 'http://127.0.0.1:8081/login' \
 ### 3.3 请求示例
 
 ```bash
-curl -sS 'http://127.0.0.1:8081/device/realtime?device_id=jlk|dyf20a|DYF20A|930813&device_type=DYF20A' \
+curl -sS 'http://47.94.14.70:8081/device/realtime?device_id=jlk|dyf20a|DYF20A|930813&device_type=DYF20A' \
   -H 'X-Token: 你的token'
 ```
 
@@ -145,7 +145,7 @@ curl -sS 'http://127.0.0.1:8081/device/realtime?device_id=jlk|dyf20a|DYF20A|9308
 ### 4.3 请求示例
 
 ```bash
-curl -sS 'http://127.0.0.1:8081/device/history/simpolist?device_id=jlk|dyf20a|DYF20A|930813&page=1&page_size=20' \
+curl -sS 'http://47.94.14.70:8081/device/history/simpolist?device_id=jlk|dyf20a|DYF20A|930813&page=1&page_size=20' \
   -H 'X-Token: 你的token'
 ```
 
@@ -221,7 +221,7 @@ X-Token: <login返回的token>
 
 ---
 
-## 7. 设备下行控制（Hub 转发）
+## 7. 设备下行控制（Hub 转发，标准版）
 
 ### 7.1 接口信息
 
@@ -229,55 +229,196 @@ X-Token: <login返回的token>
 - 路径：`/device/command`
 - 是否鉴权：是（`X-Iot-Token`，与 WebSocket 一致）
 
-### 7.2 请求体
+### 7.2 请求体（统一规范）
+
+> 对外统一使用 `unique_id`，上层调用方无需关心厂商设备号。  
+> 兼容字段：`device_id` 仍可传，但仅作为回退。
 
 ```json
 {
-  "device_id": "string",
-  "request_id": "string",
+  "unique_id": "jlk|onenet|ONENET|867369079784279",
+  "request_id": "req-001",
   "method": "thing.property.set",
-  "identifier": "power",
+  "identifier": "family_numbers",
   "params": {
-    "power": 1
+    "family_numbers": "13068040314,1,18435115041,2"
   }
 }
 ```
 
-字段说明：
-- `device_id`：目标设备标识（必填）
-- `request_id`：请求 ID（建议传，便于链路追踪）
-- `method`：指令方法（例如 `thing.property.set` / `thing.service.invoke`）
-- `identifier`：属性或服务标识
-- `params`：下发参数
+字段定义：
 
-### 7.3 请求示例
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---:|---|
+| `unique_id` | string | 是（推荐） | 业务侧设备唯一标识。Hub 优先使用该字段分发指令。 |
+| `device_id` | string | 否 | 兼容旧调用；仅当 `unique_id` 为空时使用。 |
+| `request_id` | string | 否 | 请求追踪 ID；建议业务侧传入。 |
+| `method` | string | 是 | 指令方法。推荐值：`thing.property.set`、`thing.service.invoke`。 |
+| `identifier` | string | 否 | 属性/服务标识。不同插件按自身能力解释。 |
+| `params` | object | 是 | 反控参数对象。字段名和数据类型见“7.5 参数目录”。 |
 
-```bash
-curl -sS -X POST 'http://127.0.0.1:8088/device/command' \
-  -H 'Content-Type: application/json' \
-  -H 'X-Iot-Token: your_ws_token' \
-  -d '{
-    "device_id":"862288081300541",
-    "request_id":"req-001",
-    "method":"thing.property.set",
-    "identifier":"power",
-    "params":{"power":1}
-  }'
-```
+### 7.3 分发规则
 
-### 7.4 成功响应示例
+1. Hub 计算目标标识：`target = unique_id`（若空则 `device_id`）。
+2. 调用插件路由，按插件顺序尝试认领。
+3. 第一个认领成功的插件执行下发并返回标准回包。
+
+### 7.4 响应规范
+
+成功（HTTP 200）：
 
 ```json
 {
   "request_id": "req-001",
   "code": 0,
-  "message": "ok",
-  "data": {}
+  "message": "{...参数回显...}",
+  "data": {
+    "source_id": "jlk|onenet|ONENET|867369079784279",
+    "device_id": "867369079784279",
+    "resolved_device_from": "device_id_mapping",
+    "action": "set_device_property",
+    "method": "thing.property.set",
+    "identifier": "family_numbers"
+  }
 }
 ```
 
-### 7.5 失败响应
+失败：
 
-- `400`：请求体非法 / 缺少 `device_id`
+- `400`：请求体非法 / `unique_id` 与 `device_id` 同时缺失
 - `401`：鉴权失败
-- `502`：未找到可处理该设备的插件，或插件执行失败
+- `502`：无插件认领该设备，或插件执行失败
+
+### 7.5 参数目录（字段名 + 数据类型）
+
+> 以下为当前已实现插件可直接消费的参数目录。调用方可按设备所属插件选择对应参数。
+
+#### 7.5.1 OneNET：属性下发 `thing.property.set`
+
+| identifier | params 字段 | 类型 | 说明 |
+|---|---|---|---|
+| `family_numbers` | `family_numbers` | string \| array \| object | 家庭号码；支持 CSV、数组或对象。 |
+| `emergency_contact` | `emergency_contact` | object | 紧急联系人。 |
+| `function_keys` | `function_keys` | object | 功能按键配置。 |
+| `location` | `location` | object | 定位相关配置。 |
+| `timer_tasks` | `timer_tasks` | array | 定时任务列表。 |
+| `report_interval` | `report_interval` | number \| string | 上报周期。 |
+
+OneNET 示例：
+
+```json
+{
+  "unique_id": "jlk|onenet|ONENET|867369079784279",
+  "request_id": "req-onenet-001",
+  "method": "thing.property.set",
+  "identifier": "family_numbers",
+  "params": {
+    "family_numbers": "13068040314,1,18435115041,2"
+  }
+}
+```
+
+#### 7.5.2 OneNET：服务调用 `thing.service.invoke`
+
+| identifier | params 字段 | 类型 | 说明 |
+|---|---|---|---|
+| `leave_message_add` | 自定义业务字段 | object | 留言新增。 |
+| `leave_message_text_add` | 自定义业务字段 | object | 文本留言新增。 |
+| `leave_message_clear` | 自定义业务字段 | object | 留言清空。 |
+
+#### 7.5.3 爱牵挂 X8：SOS 联系人下发 `thing.property.set`
+
+| params 字段 | 类型 | 必填 | 说明 |
+|---|---|---:|---|
+| `name` | string | 条件必填 | 联系人姓名（`clear=false` 时必填）。 |
+| `num` / `phone` | string | 条件必填 | 联系人号码（`clear=false` 时必填）。 |
+| `sos_index` / `index` / `slot` | integer | 否 | 联系人槽位，默认走插件配置。 |
+| `dial_flag` | integer | 否 | 拨号标记，默认 `1`。 |
+| `network_type` | string | 否 | 网络类型（如 `4g`）。 |
+| `clear` | boolean | 否 | 是否清空该槽位联系人。 |
+
+X8 示例：
+
+```json
+{
+  "unique_id": "jlk|aiqiangua_x8|AIQIANGUA_X8|866117051455595",
+  "request_id": "req-x8-001",
+  "method": "thing.property.set",
+  "identifier": "sos_numbers",
+  "params": {
+    "name": "张三",
+    "num": "13068040314",
+    "sos_index": 1,
+    "dial_flag": 1,
+    "network_type": "4g"
+  }
+}
+```
+
+#### 7.5.4 爱牵挂 X8：设备设置下发 `thing.property.set`
+
+| params 字段 | 类型 | 说明 |
+|---|---|---|
+| `frequency_location` | integer | 定位频率。 |
+| `frequency_step` | integer | 计步频率。 |
+| `frequency_heartrate` | integer | 心率频率。 |
+| `theshold_heartrate_h` | integer | 心率高阈值。 |
+| `theshold_heartrate_l` | integer | 心率低阈值。 |
+| `incoming_restriction` | boolean | 来电限制开关。 |
+| `sleep_enable` | boolean | 睡眠监测开关。 |
+| `heartrate_enable` | boolean | 心率监测开关。 |
+| `bloodoxygen_enable` | boolean | 血氧监测开关。 |
+| `power_down_enable` | boolean | 关机提醒开关。 |
+| ... | integer / boolean / string | 其余字段按插件能力扩展。 |
+
+> 说明：X8 设备设置参数会直接透传到厂商设备编辑接口，建议调用方仅下发已评审字段。
+
+---
+
+## 8. WS-Hub 数据重播（按 device_data.id）
+
+### 8.1 接口信息
+
+- 方法：`POST`
+- 路径：`/device/replay`
+- 是否鉴权：是（`X-Iot-Token`，与 WebSocket 一致）
+
+### 8.2 请求体
+
+```json
+{
+  "id": 8093
+}
+```
+
+字段说明：
+- `id`：`device_data` 表主键 ID（也兼容 `record_id` / `data_id`）
+
+### 8.3 请求示例
+
+```bash
+curl -sS -X POST 'http://47.94.14.70:8088/device/replay' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Iot-Token: your_ws_token' \
+  -d '{"id":8093}'
+```
+
+### 8.4 成功响应示例
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "id": 8093,
+  "device_id": "866117051453095",
+  "unique_id": "306756143402082944",
+  "data_type": "SLEEP"
+}
+```
+
+### 8.5 失败响应
+
+- `400`：请求体非法 / 缺少 `id`
+- `401`：鉴权失败
+- `404`：记录不存在
+- `500`：数据库不可用或查询失败

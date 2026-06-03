@@ -19,12 +19,16 @@ import (
 	"gopkg.in/yaml.v3"
 
 	_ "iot-middleware/plugins/aiqiangua_x8"
+	_ "iot-middleware/plugins/ctwing_aep_push_listener"
 	_ "iot-middleware/plugins/dyf20a_poller"
 	_ "iot-middleware/plugins/generic_http_listener"
 	_ "iot-middleware/plugins/likaan_push_listener"
 	_ "iot-middleware/plugins/onenet_http_push_listener"
+	_ "iot-middleware/plugins/shanghai_xikali"
 	_ "iot-middleware/plugins/simple_http_responder"
 	_ "iot-middleware/plugins/sxb_poller"
+	_ "iot-middleware/plugins/teaching_device_scaffold"
+	_ "iot-middleware/plugins/zixing_smart_home"
 )
 
 func main() {
@@ -55,6 +59,7 @@ func main() {
 		})
 		wsHubDone = wsHub.Done()
 		go wsHub.Start(ctx)
+		<-wsHub.Ready()
 		log.Printf("✅ 公共 WebSocket Hub 已启用: %s", wsHub.String())
 	} else {
 		log.Printf("⚠️ 公共 WebSocket Hub 未启用")
@@ -138,7 +143,7 @@ func main() {
 
 		// 若插件实现了 ICommandable，注册到全局命令路由器
 		if commandable, ok := worker.(base.ICommandable); ok {
-			command.Register(commandable)
+			command.RegisterNamed(name, commandable)
 			log.Printf("✅ 插件 %s 已注册命令处理器", name)
 		}
 
