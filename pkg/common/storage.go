@@ -151,6 +151,17 @@ func StartDataWriter(dataChan <-chan *base.DeviceData) {
 				data.UniqueID = strings.TrimSpace(data.DeviceID)
 			}
 			counter++
+
+			// ================================================================
+			// _NODB 过滤：DataType 以 "_NODB" 结尾的数据仅广播/打印，不落库
+			// ================================================================
+			dataType := strings.TrimSpace(data.DataType)
+			if strings.HasSuffix(dataType, "_NODB") {
+				log.Printf("[WRITER] SKIP_NODB #%d DeviceType=%s DeviceID=%s DataType=%s",
+					counter, data.DeviceType, data.DeviceID, dataType)
+				continue // 跳过落库，仅日志打印
+			}
+
 			log.Printf("[WRITER] 收到数据 #%d, DeviceType: %s, DeviceID: %s",
 				counter, data.DeviceType, data.DeviceID)
 			// 2) 把指针解引用成值，放入 batch 暂存。

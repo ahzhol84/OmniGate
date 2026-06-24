@@ -12,6 +12,7 @@ import (
 	"iot-middleware/pkg/common"
 	"iot-middleware/pkg/plugin"
 	"log"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -38,10 +39,11 @@ type ConfigItem struct {
 	ReconnectMaxWait   int    `json:"reconnect_max_wait"`
 	InsecureSkipVerify bool   `json:"insecure_skip_verify"`
 
-	ComponyName  string `json:"compony_name"`
-	DeviceType   string `json:"device_type"`
-	DataType     string `json:"data_type"`
-	UniquePrefix string `json:"unique_prefix"`
+	ComponyName      string   `json:"compony_name"`
+	DeviceType       string   `json:"device_type"`
+	DataType         string   `json:"data_type"`
+	UniquePrefix     string   `json:"unique_prefix"`
+	BlockedNicknames []string `json:"blocked_nicknames"`
 }
 
 // Worker 是上海希卡利 AMQP 消费插件主体。
@@ -131,27 +133,33 @@ func (w *Worker) Start(ctx context.Context, out chan<- *base.DeviceData) {
 		go func(idx int, manager *amqpManager, c context.Context) {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("[XIKALI-%d] PANIC recover: %v", idx, r)
+					log.Printf("[XIKALI-%d] PANIC recover: %v\nstacktrace:\n%s", idx, r, getStack())
 				}
+				log.Printf("[XIKALI-%d] consumer goroutine exiting, wg.Done() called", idx)
 				w.wg.Done()
 			}()
 			w.runConsumer(c, out, idx, manager)
 		}(i, mgr, childCtx)
 	}
 	<-ctx.Done()
-	log.Printf("[XIKALI] context cancelled, closing connections...")
+	log.Printf("[XIKALI] context cancelled (%d managers), closing connections...", len(w.managers))
 	for i, mgr := range w.managers {
+		log.Printf("[XIKALI] closing manager[%d]...", i)
 		if w.cancelFuncs[i] != nil {
 			w.cancelFuncs[i]()
+			log.Printf("[XIKALI] cancelFunc[%d] called", i)
 		}
 		if mgr != nil {
 			mgr.close()
+			log.Printf("[XIKALI] manager[%d] close() returned", i)
 		}
 	}
-	log.Printf("[XIKALI] waiting for consumer goroutines (max 10s)...")
+	log.Printf("[XIKALI] waiting for consumer goroutines (max 10s), wg=%d...", len(w.configs))
 	waitCh := make(chan struct{})
 	go func() {
+		log.Printf("[XIKALI] wg.Wait() starting...")
 		w.wg.Wait()
+		log.Printf("[XIKALI] wg.Wait() completed")
 		close(waitCh)
 	}()
 	select {
@@ -191,7 +199,7 @@ func (w *Worker) runConsumer(ctx context.Context, out chan<- *base.DeviceData, i
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("%s context done, exiting consumer", pluginTag)
+			log.Printf("%s context done (ctx.Err=%v), exiting consumer", pluginTag, ctx.Err())
 			return
 		default:
 		}
@@ -202,6 +210,7 @@ func (w *Worker) runConsumer(ctx context.Context, out chan<- *base.DeviceData, i
 		}
 		log.Printf("%s AMQP connection established, starting receive loop", pluginTag)
 		mgr.receiveLoop(ctx, out, index, pluginTag)
+		log.Printf("%s receiveLoop returned, will reconnect if context not done", pluginTag)
 	}
 }
 
@@ -243,13 +252,13 @@ func (m *amqpManager) receiveLoop(ctx context.Context, out chan<- *base.DeviceDa
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("%s context done, exiting receive loop", pluginTag)
+			log.Printf("%s context done (ctx.Err=%v), exiting receive loop", pluginTag, ctx.Err())
 			return
 		default:
 		}
 		msg, err := m.receiver.Receive(ctx)
 		if err != nil {
-			log.Printf("%s receive error: %v", pluginTag, err)
+			log.Printf("%s receive error: %v (ctx.Err=%v)", pluginTag, err, ctx.Err())
 			return
 		}
 		go func(message *amqp.Message) {
@@ -276,71 +285,134 @@ func (m *amqpManager) processMessage(msg *amqp.Message, out chan<- *base.DeviceD
 		log.Printf("%s empty payload, skip", pluginTag)
 		return
 	}
-	// log.Printf("%s recv topic=%s payload=%s", pluginTag, topic, payload)
+
 	var rawObj map[string]interface{}
 	if err := json.Unmarshal([]byte(payload), &rawObj); err != nil {
 		log.Printf("%s json parse fail: %v", pluginTag, err)
 		m.sendToChannel(out, deviceDataFromRaw(cfg, topic, payload, ""), pluginTag)
 		return
 	}
-	deviceID := extractDeviceID(rawObj)
+
+	// ============================================================
+	// 使用结构化解析器将原始 AMQP JSON 解析为人类可读数据
+	// 原始 JSON 不保留，只存解析后的结构化数据
+	//
+	// 消息分类策略：
+	//   - msgDataUpdate（/user/update）→ 结构化解析后广播给 wshub，不落库
+	//   - msgWarning（/user/warning）→ 解析成通知结构，广播给 wshub，不落库
+	//   - msgUnknown → 回退提取基础信息，可落库
+	// ============================================================
+	parsed, deviceID, msgCat, isParsed := ParsePayload(rawObj, topic)
+
 	if deviceID == "" {
 		deviceID = extractDeviceIDFromTopic(topic)
 	}
 	if deviceID == "" {
 		deviceID = "UNKNOWN"
 	}
-	nickname := extractNickname(rawObj)
-	// 设备过滤：只放行指定 nickname 的设备
-	allowedNicknames := map[string]bool{
-		"X1LTE_S01B03N127": true,
+
+	// 获取设备备注名用于黑名单判断
+	nickname := parsed.DeviceName
+	if nickname == "" {
+		nickname = extractNickname(rawObj)
 	}
-	if nickname != "" && !allowedNicknames[nickname] {
-		// log.Printf("%s SKIP device=%s nickname=%s (filtered)", pluginTag, deviceID, nickname)
-		return
+
+	// 黑名单模式：名单中的设备只打印日志，不存储到数据库
+	isBlocked := false
+	if len(cfg.BlockedNicknames) > 0 && nickname != "" {
+		for _, n := range cfg.BlockedNicknames {
+			if n == nickname {
+				isBlocked = true
+				break
+			}
+		}
 	}
-	flatPayload := flattenAliYunItems(rawObj)
-	if flatPayload == nil {
-		m.sendToChannel(out, deviceDataFromRaw(cfg, topic, payload, deviceID), pluginTag)
-		return
-	}
-	flatPayload["_topic"] = topic
-	if method, ok := rawObj["method"]; ok {
-		flatPayload["_method"] = method
-	}
-	if id, ok := rawObj["id"]; ok {
-		flatPayload["_id"] = id
-	}
-	if version, ok := rawObj["version"]; ok {
-		flatPayload["_version"] = version
-	}
+
 	uniqueID := common.ResolveDeviceUniqueID(
 		deviceID, cfg.ComponyName, "shanghai_xikali", cfg.DeviceType, deviceID,
 	)
-	payloadBytes, err := json.Marshal(flatPayload)
+
+	// 将结构化解析结果序列化为 JSON → 作为 Payload 存储
+	parsedBytes, err := json.Marshal(parsed)
 	if err != nil {
-		log.Printf("%s marshal fail: %v", pluginTag, err)
+		log.Printf("%s marshal parsed payload fail: %v", pluginTag, err)
 		m.sendToChannel(out, deviceDataFromRaw(cfg, topic, payload, deviceID), pluginTag)
 		return
 	}
+
+	// ============================================================
+	// DataType 标记策略：
+	//   - 正常数据上报 / 通知消息 → DataType 末尾加 "_NODB" 标记，
+	//     上游 DataWriter 检测到此标记跳过落库，但通道照常广播
+	//   - 无法识别的消息 → 正常落库
+	// ============================================================
 	deviceType := strings.TrimSpace(cfg.DeviceType)
-	dataType := buildDataType(cfg.DataType, rawObj)
+
+	// 计算基础 DataType：优先使用 parsed.Method，其次从 rawObj 取
+	baseDataType := cfg.DataType
+	if parsed.Method != "" {
+		baseDataType = fmt.Sprintf("%s_%s", cfg.DataType, parsed.Method)
+	}
+
+	// 高频数据不上报 / 通知消息 / 平台结构化输出 → 加 _NODB 标记让上游跳过落库
+	shouldStoreDB := true
+	switch msgCat {
+	case msgDataUpdate:
+		// 数据上报（高频）：必须广播给 wshub，但不需要落库
+		shouldStoreDB = false
+		baseDataType = baseDataType + "_NODB"
+	case msgWarning:
+		// 通知消息：广播，不落库
+		shouldStoreDB = false
+		baseDataType = "NOTIFICATION_NODB"
+	case msgPlatformOutput:
+		// 平台结构化输出（高频）：广播给 wshub，不落库
+		shouldStoreDB = false
+		baseDataType = baseDataType + "_NODB"
+	}
+
 	data := &base.DeviceData{
-		DeviceID: deviceID, UniqueID: uniqueID, DeviceType: deviceType,
-		DataType: dataType, Timestamp: time.Now(), Payload: payloadBytes,
+		DeviceID:    deviceID,
+		UniqueID:    uniqueID,
+		DeviceType:  deviceType,
+		DataType:    baseDataType,
+		Timestamp:   time.Now(),
+		Payload:     parsedBytes, // 只存解析后的结构化数据，不存原始 JSON
 		ComponyName: cfg.ComponyName,
 	}
-	if deviceID != "" && deviceID != "UNKNOWN" {
+
+	if shouldStoreDB && deviceID != "" && deviceID != "UNKNOWN" {
 		if err := common.UpsertDeviceIDMapping("shanghai_xikali", uniqueID, deviceID,
-			cfg.ComponyName, deviceType, dataType); err != nil {
+			cfg.ComponyName, deviceType, baseDataType); err != nil {
 			log.Printf("%s mapping upsert err unique=%s dev=%s err=%v", pluginTag, uniqueID, deviceID, err)
 		}
 	}
-	log.Printf("%s OK device=%s nickname=%s unique=%s", pluginTag, deviceID, nickname, uniqueID)
-	select {
-	case out <- data:
-	case <-time.After(3 * time.Second):
-		log.Printf("%s channel busy, drop device=%s nickname=%s", pluginTag, deviceID, nickname)
+
+	if isBlocked {
+		log.Printf("%s BLOCKED device=%s nickname=%s (blacklisted, print only, not stored)", pluginTag, deviceID, nickname)
+	} else {
+		storeTag := ""
+		if !shouldStoreDB {
+			storeTag = " [NODB]"
+		}
+		if isParsed {
+			log.Printf("%s OK%s device=%s type=%s msgCat=%d nickname=%s unique=%s",
+				pluginTag, storeTag, deviceID, parsed.DeviceType, msgCat, nickname, uniqueID)
+		} else {
+			log.Printf("%s OK%s (fallback) device=%s msgCat=%d nickname=%s unique=%s",
+				pluginTag, storeTag, deviceID, msgCat, nickname, uniqueID)
+		}
+		// 使用 recover 防止向已关闭 channel 发送时 panic
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("%s PANIC recover at send to out channel: %v\nstacktrace:\n%s", pluginTag, r, getStack())
+			}
+		}()
+		select {
+		case out <- data:
+		case <-time.After(3 * time.Second):
+			log.Printf("%s channel busy, drop device=%s nickname=%s", pluginTag, deviceID, nickname)
+		}
 	}
 }
 
@@ -348,6 +420,11 @@ func (m *amqpManager) sendToChannel(out chan<- *base.DeviceData, data *base.Devi
 	if data == nil {
 		return
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("%s PANIC recover at sendToChannel: %v\nstacktrace:\n%s", pluginTag, r, getStack())
+		}
+	}()
 	select {
 	case out <- data:
 		log.Printf("%s (raw) sent device=%s", pluginTag, data.DeviceID)
@@ -363,19 +440,57 @@ func (m *amqpManager) close() {
 }
 
 func (m *amqpManager) closeLocked() {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	log.Printf("[XIKALI] closeLocked: receiver=%v session=%v client=%v",
+		m.receiver != nil, m.session != nil, m.client != nil)
+
+	// 每个 close 步骤设置单独的 goroutine + 短超时保护，防止卡死
+	closeWithTimeout := func(name string, closeFn func(context.Context) error, closeFnNoCtx func() error) {
+		done := make(chan struct{}, 1)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[XIKALI] PANIC in close(%s): %v\nstacktrace:\n%s", name, r, getStack())
+				}
+				done <- struct{}{}
+			}()
+			if closeFn != nil {
+				// 带 context 的 close
+				ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+				defer cancel()
+				if err := closeFn(ctx); err != nil {
+					log.Printf("[XIKALI] %s.Close error: %v (ignored during shutdown)", name, err)
+				}
+			} else if closeFnNoCtx != nil {
+				if err := closeFnNoCtx(); err != nil {
+					log.Printf("[XIKALI] %s.Close error: %v (ignored during shutdown)", name, err)
+				}
+			}
+		}()
+		select {
+		case <-done:
+			log.Printf("[XIKALI] %s closed", name)
+		case <-time.After(3 * time.Second):
+			log.Printf("[XIKALI] WARN: %s.Close timed out after 3s, force proceeding", name)
+		}
+	}
+
 	if m.receiver != nil {
-		_ = m.receiver.Close(ctx)
+		log.Printf("[XIKALI] closing receiver...")
+		r := m.receiver
 		m.receiver = nil
+		closeWithTimeout("receiver", r.Close, nil)
 	}
 	if m.session != nil {
-		_ = m.session.Close(ctx)
+		log.Printf("[XIKALI] closing session...")
+		s := m.session
 		m.session = nil
+		closeWithTimeout("session", s.Close, nil)
 	}
 	if m.client != nil {
-		_ = m.client.Close()
+		log.Printf("[XIKALI] closing client...")
+		c := m.client
 		m.client = nil
+		closeWithTimeout("client", nil, c.Close)
 	}
 }
 
@@ -465,6 +580,15 @@ func extractNickname(obj map[string]interface{}) string {
 	return strings.TrimSpace(fmt.Sprintf("%v", value))
 }
 
+// flattenAliYunItems 展开阿里云物联网平台标准 items 嵌套结构。
+//
+// 对于 payload 中包含 items 字段的消息（标准阿里云 AMQP 订阅格式），
+// 该函数将 { "DeviceID": { "value": "xxx" }, "Temperature": { "value": 25.5 } }
+// 展开为 { "DeviceID": "xxx", "Temperature": 25.5 } 的扁平 map。
+//
+// 在 processMessage 中已通过 if !hasItems { return } 过滤掉了非 items 格式的消息。
+// 如需对非 items 格式也进行存储，可注释 processMessage 中对应的 if 块，
+// 并在此函数中补充对应格式的解析逻辑。
 func flattenAliYunItems(obj map[string]interface{}) map[string]interface{} {
 	items, ok := obj["items"].(map[string]interface{})
 	if !ok || len(items) == 0 {
@@ -527,6 +651,13 @@ func truncateString(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// getStack 获取当前 goroutine 的调用栈信息，用于 panic 日志。
+func getStack() string {
+	buf := make([]byte, 4096)
+	n := runtime.Stack(buf, false)
+	return string(buf[:n])
 }
 
 func init() {

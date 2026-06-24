@@ -22,6 +22,7 @@ import (
 	_ "iot-middleware/plugins/ctwing_aep_push_listener"
 	_ "iot-middleware/plugins/dyf20a_poller"
 	_ "iot-middleware/plugins/generic_http_listener"
+	_ "iot-middleware/plugins/huanjing_jiankong_v3"
 	_ "iot-middleware/plugins/likaan_push_listener"
 	_ "iot-middleware/plugins/onenet_http_push_listener"
 	_ "iot-middleware/plugins/shanghai_xikali"
