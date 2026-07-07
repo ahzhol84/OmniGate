@@ -37,18 +37,17 @@
       command_timeout: 10             # 命令超时（秒）
       error_retry_max: 3              # 错误重试次数
       devices:
+        # 因子过滤模式：按 factor_name 匹配过滤
         - device_addr: 21120446
           device_name: "21120446"
           node_id: 2
           register_id: 5
           factor_name: "光照"
           unit: "lux"
-        - device_addr: 21151922
-          device_name: "21151922"
-          node_id: 2
-          register_id: 5
-          factor_name: "光照"
-          unit: "lux"
+        # 原始捕获模式：整条设备原始 JSON 原样输出（适用于新类型设备）
+        - device_addr: 15206359
+          device_name: "15206359"
+          raw_capture: true
 ```
 
 ## 配置字段说明
@@ -68,6 +67,8 @@
 
 每个设备需要指定以下信息，用于定位平台中的数据：
 
+### 因子过滤模式（默认）
+
 ```json
 {
   "device_addr": 21120446,    // 设备地址（必需）
@@ -78,6 +79,28 @@
   "unit": "lux"               // 单位
 }
 ```
+
+### 原始捕获模式
+
+当设备类型未知或数据结构复杂不适合按因子过滤时，设置 `raw_capture: true`，插件会将平台返回的**整条设备原始数据**原封不动写入 Payload。
+
+```json
+{
+  "device_addr": 15206359,    // 设备地址（必需）
+  "device_name": "15206359",  // 设备名称
+  "raw_capture": true          // 启用原始捕获模式
+}
+```
+
+**原始捕获模式的特点**：
+- 不做 `dataItem[]` / `registerItem[]` 解析和因子过滤
+- Payload 中 `raw_data` 字段包含平台返回的完整设备 JSON
+- `DataType` 为 `"HUANJING_RAW"`（区别于因子过滤模式的 `"HUANJING_REALTIME"`）
+- 适用于新型传感器、复合数据设备等
+
+| 字段 | 说明 | 默认值 |
+|------|------|--------|
+| `raw_capture` | 原始捕获模式开关 | `false` |
 
 ## 工作流程
 
@@ -90,7 +113,18 @@
     ↓
 调用 /api/data/getRealTimeData?deviceAddrs=xxx
     ↓
-解析响应，按配置过滤因子
+┌─ 按设备配置分流 ──────────────┐
+│                                │
+├─ raw_capture=false ────────────┤
+│  解析响应，按因子配置过滤       │
+│  整理精致 Payload               │
+│  DataType: HUANJING_REALTIME   │
+│                                │
+├─ raw_capture=true ─────────────┤
+│  整条设备原始 JSON 原样写入     │
+│  Payload.raw_data 包含完整数据  │
+│  DataType: HUANJING_RAW         │
+└────────────────────────────────┘
     ↓
 标准化为 DeviceData
     ↓

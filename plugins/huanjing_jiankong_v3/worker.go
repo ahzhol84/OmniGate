@@ -35,6 +35,7 @@ type DeviceConfig struct {
 	RegisterID int    `json:"register_id"` // 寄存器ID（用于寻址数据）
 	FactorName string `json:"factor_name"` // 因子名称，例如 光照
 	Unit       string `json:"unit"`        // 单位，例如 lux
+	RawCapture bool   `json:"raw_capture"` // 是否原始捕获整条设备数据（不做因子过滤）
 }
 
 // Worker 是綜合環境監控云平台 3.0 的插件主体。
@@ -368,6 +369,9 @@ func (w *Worker) getRealTimeData(ctx context.Context, cfg ConfigItem, token stri
 }
 
 // processRealTimeData 解析实时数据并投递到 out 通道。
+// 支持两种模式：
+//   - 因子过滤模式（RawCapture=false，默认）：按 device_addr + factor_name 双重匹配过滤，整理精致 Payload。
+//   - 原始捕获模式（RawCapture=true）：不过滤因子，将整条设备原始 JSON 写入 Payload，DataType 为 HUANJING_RAW。
 func (w *Worker) processRealTimeData(cfg ConfigItem, cfgIdx int, dataList []map[string]interface{}, out chan<- *base.DeviceData) {
 	for _, item := range dataList {
 		deviceAddr, _ := item["deviceAddr"].(float64)
@@ -377,86 +381,142 @@ func (w *Worker) processRealTimeData(cfg ConfigItem, cfgIdx int, dataList []map[
 		deviceID := fmt.Sprintf("%d", int64(deviceAddr))
 		uniqueID := deviceID
 
-		// 解析设备的所有因子数据
-		dataItems, ok := item["dataItem"].([]interface{})
-		if !ok {
+		// 查找此设备是否有对应的配置项
+		var matchedDevCfg *DeviceConfig
+		for i := range cfg.Devices {
+			if cfg.Devices[i].DeviceAddr == int(deviceAddr) {
+				matchedDevCfg = &cfg.Devices[i]
+				break
+			}
+		}
+		if matchedDevCfg == nil {
+			continue // 未配置的设备跳过
+		}
+
+		// ─── 原始捕获模式 ─────────────────────────────────────────
+		if matchedDevCfg.RawCapture {
+			payload := map[string]interface{}{
+				"device_addr":   int64(deviceAddr),
+				"device_name":   deviceName,
+				"raw_data":      item, // 整条设备原始数据
+				"device_status": item["deviceStatus"],
+			}
+			payloadBytes, _ := json.Marshal(payload)
+
+			ts := time.Now()
+			if timeStampMs > 0 {
+				ts = time.UnixMilli(int64(timeStampMs))
+			}
+
+			msg := &base.DeviceData{
+				DeviceID:    deviceID,
+				UniqueID:    uniqueID,
+				DeviceType:  "HUANJING_JIANKONG_V3",
+				DataType:    "HUANJING_RAW",
+				Timestamp:   ts,
+				Payload:     payloadBytes,
+				ComponyName: cfg.ComponyName,
+			}
+
+			select {
+			case out <- msg:
+				log.Printf("[HUANJING] raw data sent: device=%s", deviceID)
+			case <-time.After(2 * time.Second):
+				log.Printf("[HUANJING] warning: channel busy, dropping raw data for device=%s", deviceID)
+			}
 			continue
 		}
 
-		for _, dataItemRaw := range dataItems {
-			dataItem, ok := dataItemRaw.(map[string]interface{})
-			if !ok {
-				continue
-			}
+		// ─── 因子过滤模式（平铺合并输出）─────────────────────────
+		// 所有字段平铺到第一层，纯英文 key + 序号后缀
+		payload := map[string]interface{}{
+			"device_addr":   int64(deviceAddr),
+			"device_name":   deviceName,
+			"device_status": item["deviceStatus"],
+		}
 
-			// 寻找注册表数据
-			registerItems, ok := dataItem["registerItem"].([]interface{})
-			if !ok {
-				continue
-			}
-
-			for _, regItemRaw := range registerItems {
-				regItem, ok := regItemRaw.(map[string]interface{})
+		factorIndex := 0
+		dataItems, ok := item["dataItem"].([]interface{})
+		if ok {
+			for _, dataItemRaw := range dataItems {
+				dataItem, ok := dataItemRaw.(map[string]interface{})
 				if !ok {
 					continue
 				}
 
-				// 提取目标字段
-				data, _ := regItem["data"].(string)
-				registerName, _ := regItem["registerName"].(string)
-				unit, _ := regItem["unit"].(string)
-
-				// 按配置过滤设备（只保存配置里声明的因子）
-				shouldInclude := false
-				for _, devCfg := range cfg.Devices {
-					if devCfg.DeviceAddr == int(deviceAddr) &&
-						devCfg.FactorName == registerName {
-						shouldInclude = true
-						break
-					}
-				}
-				if !shouldInclude {
+				registerItems, ok := dataItem["registerItem"].([]interface{})
+				if !ok {
 					continue
 				}
 
-				// 构建 payload
-				payload := map[string]interface{}{
-					"device_addr":   int64(deviceAddr),
-					"device_name":   deviceName,
-					"register_name": registerName,
-					"data":          data,
-					"value":         regItem["value"],
-					"alarm_level":   regItem["alarmLevel"],
-					"alarm_info":    regItem["alarmInfo"],
-					"unit":          unit,
-					"device_status": item["deviceStatus"],
-				}
-				payloadBytes, _ := json.Marshal(payload)
+				for _, regItemRaw := range registerItems {
+					regItem, ok := regItemRaw.(map[string]interface{})
+					if !ok {
+						continue
+					}
 
-				// 计算时间戳
-				ts := time.Now()
-				if timeStampMs > 0 {
-					ts = time.UnixMilli(int64(timeStampMs))
-				}
+					registerName, _ := regItem["registerName"].(string)
 
-				msg := &base.DeviceData{
-					DeviceID:    deviceID,
-					UniqueID:    uniqueID,
-					DeviceType:  "HUANJING_JIANKONG_V3",
-					DataType:    "HUANJING_REALTIME",
-					Timestamp:   ts,
-					Payload:     payloadBytes,
-					ComponyName: cfg.ComponyName,
-				}
+					// 检查此因子是否在配置中声明
+					matched := false
+					for _, devCfg := range cfg.Devices {
+						if devCfg.DeviceAddr == int(deviceAddr) &&
+							devCfg.FactorName == registerName {
+							matched = true
+							break
+						}
+					}
+					if !matched {
+						continue
+					}
 
-				select {
-				case out <- msg:
-					log.Printf("[HUANJING] data sent: device=%s factor=%s value=%s",
-						deviceID, registerName, data)
-				case <-time.After(2 * time.Second):
-					log.Printf("[HUANJING] warning: channel busy, dropping data for device=%s", deviceID)
+					data, _ := regItem["data"].(string)
+					unit, _ := regItem["unit"].(string)
+
+					// 平铺到第一层，纯英文 key，用序号区分多个因子
+					suffix := fmt.Sprintf("_%d", factorIndex)
+					if factorIndex == 0 {
+						suffix = ""
+					}
+					payload["register_name"+suffix] = registerName
+					payload["data"+suffix] = data
+					payload["value"+suffix] = regItem["value"]
+					payload["unit"+suffix] = unit
+					payload["alarm_level"+suffix] = regItem["alarmLevel"]
+					payload["alarm_info"+suffix] = regItem["alarmInfo"]
+
+					factorIndex++
 				}
 			}
+		}
+
+		// 没有匹配到任何因子则跳过
+		if len(payload) <= 3 { // 只有 device_addr/device_name/device_status 三个基础字段
+			continue
+		}
+
+		payloadBytes, _ := json.Marshal(payload)
+
+		ts := time.Now()
+		if timeStampMs > 0 {
+			ts = time.UnixMilli(int64(timeStampMs))
+		}
+
+		msg := &base.DeviceData{
+			DeviceID:    deviceID,
+			UniqueID:    uniqueID,
+			DeviceType:  "HUANJING_JIANKONG_V3",
+			DataType:    "HUANJING_REALTIME",
+			Timestamp:   ts,
+			Payload:     payloadBytes,
+			ComponyName: cfg.ComponyName,
+		}
+
+		select {
+		case out <- msg:
+			log.Printf("[HUANJING] data sent: device=%s", deviceID)
+		case <-time.After(2 * time.Second):
+			log.Printf("[HUANJING] warning: channel busy, dropping data for device=%s", deviceID)
 		}
 	}
 }
