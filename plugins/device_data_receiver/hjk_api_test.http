@@ -1,0 +1,207 @@
+### =========================================
+### HJK 手表 API 测试文件
+### 设备 ID: 359339078150060
+### 基础地址: http://yg.hxinwatch.com/sdkapi/api/push/hjk
+### =========================================
+
+### ========================
+### 1. 下发指令类
+### ========================
+
+### 1.1 远程立即定位 (command=128)
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/submitcommand.htm?deviceid=359339078150060&command=128
+
+### 1.2 远程测量心率 (command=127)
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/submitcommand.htm?deviceid=359339078150060&command=127
+
+### 1.3 远程关机 (command=121)
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/submitcommand.htm?deviceid=359339078150060&command=121
+
+### 1.4 远程测量血压 (command=120)
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/submitcommand.htm?deviceid=359339078150060&command=120
+
+### 1.5 远程测量体温 (command=117)
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/submitcommand.htm?deviceid=359339078150060&command=117
+
+### 1.6 远程测量血氧 (command=119)
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/submitcommand.htm?deviceid=359339078150060&command=119
+
+### 1.7 远程设备重启 (command=141)
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/submitcommand.htm?deviceid=359339078150060&command=141
+
+### 1.8 恢复出厂设置 (command=90)
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/submitcommand.htm?deviceid=359339078150060&command=90
+
+### 1.9 查找设备 (command=164)
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/submitcommand.htm?deviceid=359339078150060&command=164
+
+### 1.10 远程开始测量血糖 (command=162)
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/submitcommand.htm?deviceid=359339078150060&command=162
+
+### ========================
+### 2. 带参数指令类
+### ========================
+
+### 2.1 下发文字信息到手表 (command=115, cmdvalue=hello)
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/submitcommand.htm?deviceid=359339078150060&command=115&cmdvalue=hello
+
+### 2.2 下发二维码信息到手表 (command=142, cmdvalue=1234567890)
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/submitcommand.htm?deviceid=359339078150060&command=142&cmdvalue=1234567890
+
+### 2.3 设置计步器工作时间 (command=143, cmdvalue=09:00-21:00)
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/submitcommand.htm?deviceid=359339078150060&command=143&cmdvalue=09:00-21:00
+
+### 2.4 设置睡眠时间 (command=147, cmdvalue=21:00-08:00)
+### 21:00 是睡眠时间，08:00 是起床时间
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/submitcommand.htm?deviceid=359339078150060&command=147&cmdvalue=21:00-08:00
+
+### 2.5 设置免打扰时间 (command=140, cmdvalue=21:10-7:30-1)
+### 最多设置4组，最少1组；-0关闭 -1开启
+### 示例: 21:10-7:30-1,21:10-7:30-0,21:10-7:30-0,21:10-7:30-1
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/submitcommand.htm?deviceid=359339078150060&command=140&cmdvalue=21:10-7:30-1,21:10-7:30-0,21:10-7:30-0,21:10-7:30-1
+
+### 2.6 久坐提醒设置 (command=146, cmdvalue=1,30)
+### 1=开启久坐, 0=关闭；30=间隔分钟(支持30/60/90)
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/submitcommand.htm?deviceid=359339078150060&command=146&cmdvalue=1,30
+
+### 2.7 设置测量健康偏差参数 (command=103, cmdvalue=5,6,5,10,1.2)
+### 格式: 心率,高压,低压,血氧,体温
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/submitcommand.htm?deviceid=359339078150060&command=103&cmdvalue=5,6,5,10,1.2
+
+### 2.8 下发血压学习后的值到手表 (command=152, cmdvalue=80,120)
+### 80=舒张压, 120=收缩压
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/submitcommand.htm?deviceid=359339078150060&command=152&cmdvalue=80,120
+
+### 2.9 下发血糖学习信息到手表 (command=161, cmdvalue=1,9.6)
+### 1=血糖类型(0空腹/1餐后半小时/2餐后1h/3餐后2h/4餐后4h), 9.6=血糖值
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/submitcommand.htm?deviceid=359339078150060&command=161&cmdvalue=1,9.6
+
+### 2.10 设置蓝牙扫描参数 (command=148, cmdvalue=1)
+### cmdvalue=1 表示1分钟扫描一次蓝牙并上传
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/submitcommand.htm?deviceid=359339078150060&command=148&cmdvalue=1
+
+### 2.11 设备快捷拨号 (command=163, cmdvalue=187772727772)
+### cmdvalue=快捷拨号的号码
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/submitcommand.htm?deviceid=359339078150060&command=163&cmdvalue=187772727772
+
+### ========================
+### 3. 下发语音到手表 (POST - JSON)
+### ========================
+
+### 3.1 下发语音到手表 (command=118)
+POST http://yg.hxinwatch.com/sdkapi/api/push/hjk/submitcommand.htm
+Content-Type: application/json
+
+{
+    "deviceid": "359339078150060",
+    "command": 118,
+    "cmdvalue": "YmFzZTY05Yqo56CB55qE6K+d6Zmp5pWw5o2u" 
+}
+
+### ========================
+### 4. 设备配置参数修改
+### ========================
+
+### 4.1 设置 SOS 联系人
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/setWatch.htm?deviceid=359339078150060&sos1=13433333333&sos2=13444444444&sos3=134444444434
+
+### 4.2 清除 SOS 联系人
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/setWatch.htm?deviceid=359339078150060&sos1=+&sos2=+&sos3=+
+
+### 4.3 设置定位上传间隔 (30分钟)
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/setWatch.htm?deviceid=359339078150060&locationtimeinterval=30
+
+### 4.4 设置心率上传间隔和安全阀值
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/setWatch.htm?deviceid=359339078150060&maxheartrate=100&minheartrate=60&heartratetimeinterval=30
+
+### 4.5 设置血压上传安全阀值
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/setWatch.htm?deviceid=359339078150060&bplowmin=50&bplowmax=90&bphighmin=100&bphighmax=150&bpi=30
+
+### 4.6 设置血氧上传安全阀值
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/setWatch.htm?deviceid=359339078150060&bloodoxmax=99&bloodoxmin=9
+
+### 4.7 设置体温间隔 (清除)
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/setWatch.htm?deviceid=359339078150060&tpi=&oxi=
+
+### 4.8 设置联系人号码
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/setWatch.htm?deviceid=359339078150060&pbname1=5byg5Li95Y2O&book1=13528897740&pbname2=5byg5Zu96Imv&book2=13502863143&pbname3=6YKx5ben57qi&book3=13662562721
+
+### 4.9 清除联系人号码
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/setWatch.htm?deviceid=359339078150060&pbname1=+&book1=+
+
+### 4.10 设置服务号码
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/setWatch.htm?deviceid=359339078150060&num1=13411111111
+
+### 4.11 设置血压学习值
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/setWatch.htm?deviceid=359339078150060&studybloodp=80,120
+
+### 4.12 设置喝水、吃药提醒时间
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/setWatch.htm?deviceid=359339078150060&medicine1=0:0&m1=1&medicine2=0:0&m2=1&medicine3=0:0&m3=1
+
+### 4.13 设置开关机时间
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/setWatch.htm?deviceid=359339078150060&of_status=1&of_on=08:00&of_off=21:00
+
+### 4.14 设置语音闹钟 (POST - JSON)
+POST http://yg.hxinwatch.com/sdkapi/api/push/hjk/setWatch.htm
+Content-Type: application/json
+
+{
+    "deviceid": "359339078150060",
+    "reminds": [
+        {
+            "name": "起床闹钟",
+            "time": "07:00",
+            "status": 1,
+            "audio": "5b2T6Zet5ZCO5b6X5L2g",
+            "week": "1111111"
+        }
+    ]
+}
+
+### ========================
+### 5. 电子围栏
+### ========================
+
+### 5.1 设置圆形电子围栏 (GET)
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/updateelectricfence.htm?deviceid=359339078150060&longitude=112.415224&latitude=26.937528&fanwei=3000
+
+### 5.2 取消圆形电子围栏 (fanwei=0)
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/updateelectricfence.htm?deviceid=359339078150060&longitude=112.415224&latitude=26.937528&fanwei=0
+
+### 5.3 设置多边形电子围栏 (POST)
+POST http://yg.hxinwatch.com/sdkapi/api/push/hjk/updateelectricfence.htm
+Content-Type: application/json
+
+{
+    "deviceid": "359339078150060",
+    "name": "公司围栏",
+    "path": [
+        {"lon": 113.223, "lat": 23.4445},
+        {"lon": 113.323, "lat": 23.5445},
+        {"lon": 113.423, "lat": 23.4445}
+    ]
+}
+
+### 5.4 清除多边形电子围栏 (POST - path为空数组)
+POST http://yg.hxinwatch.com/sdkapi/api/push/hjk/updateelectricfence.htm
+Content-Type: application/json
+
+{
+    "deviceid": "359339078150060",
+    "name": "公司围栏",
+    "path": []
+}
+
+### ========================
+### 6. 服务 API
+### ========================
+
+### 6.1 查看设备长连接是否在线
+GET http://yg.hxinwatch.com/sdkapi/api/push/hjk/getWatchOnlineStatus.htm?deviceid=359339078150060
+
+### ========================
+### 7. H5 链接 (供参考)
+### ========================
+
+### 历史位置 (需替换 appid 和 appkey)
+### http://wx.hxinwatch.com/pages/main/location?imei=359339078150060&appid=YOUR_APPID&appkey=YOUR_APPKEY

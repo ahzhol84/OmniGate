@@ -114,7 +114,7 @@ func (w *Worker) Start(ctx context.Context, out chan<- *base.DeviceData) {
 	for i := range w.configs {
 		cfg := w.configs[i]
 		handlers[cfg.ReceivePath] = w.buildHandler(cfg, out)
-		log.Printf("[ONENET] route mounted path=%s listen=%s", cfg.ReceivePath, w.listenAddr)
+		log.Printf("[ONENET] 路由已挂载 路径=%s 监听地址=%s", cfg.ReceivePath, w.listenAddr)
 	}
 
 	handler := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
@@ -123,7 +123,7 @@ func (w *Worker) Start(ctx context.Context, out chan<- *base.DeviceData) {
 			h(rw, req)
 			return
 		}
-		log.Printf("[ONENET] unmatched route method=%s path=%s remote=%s", req.Method, req.URL.Path, req.RemoteAddr)
+		log.Printf("[ONENET] 未匹配路由 方法=%s 路径=%s 远程地址=%s", req.Method, req.URL.Path, req.RemoteAddr)
 		http.NotFound(rw, req)
 	})
 
@@ -136,9 +136,9 @@ func (w *Worker) Start(ctx context.Context, out chan<- *base.DeviceData) {
 		_ = w.server.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("[ONENET] listening at %s", w.listenAddr)
+	log.Printf("[ONENET] 正在监听 %s", w.listenAddr)
 	if err := w.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Printf("[ONENET] server exited with error: %v", err)
+		log.Printf("[ONENET] 服务异常退出: %v", err)
 	}
 }
 
@@ -194,7 +194,7 @@ func (w *Worker) handleURLVerify(rw http.ResponseWriter, req *http.Request, cfg 
 		_, _ = rw.Write([]byte("ok"))
 	}
 
-	log.Printf("[ONENET] url verify path=%s remote=%s token_verify=%t success", cfg.ReceivePath, req.RemoteAddr, cfg.EnableTokenVerify)
+	log.Printf("[ONENET] URL验证成功 路径=%s 远程地址=%s 令牌验证=%t", cfg.ReceivePath, req.RemoteAddr, cfg.EnableTokenVerify)
 }
 
 // handlePushData 处理 OneNET 推送数据并转换为 DeviceData。
@@ -227,12 +227,12 @@ func (w *Worker) handlePushData(rw http.ResponseWriter, req *http.Request, cfg C
 	}
 
 	prettyBody, _ := json.MarshalIndent(payloadObj, "", "  ")
-	log.Printf("[ONENET] recv path=%s remote=%s payload=\n%s", cfg.ReceivePath, req.RemoteAddr, string(prettyBody))
+	log.Printf("[ONENET] 收到推送 路径=%s 远程地址=%s 载荷=\n%s", cfg.ReceivePath, req.RemoteAddr, string(prettyBody))
 
 	innerMsgObj, hasInner := parseInnerMsg(payloadObj)
 	if hasInner {
 		prettyInner, _ := json.MarshalIndent(innerMsgObj, "", "  ")
-		log.Printf("[ONENET] parsed inner msg path=%s remote=%s msg=\n%s", cfg.ReceivePath, req.RemoteAddr, string(prettyInner))
+		log.Printf("[ONENET] 解析内部消息 路径=%s 远程地址=%s 消息=\n%s", cfg.ReceivePath, req.RemoteAddr, string(prettyInner))
 	}
 
 	// 按需保留原始上报 JSON，便于上层按消息原貌做分类统计。
@@ -256,7 +256,7 @@ func (w *Worker) handlePushData(rw http.ResponseWriter, req *http.Request, cfg C
 			"unique_id": deviceID,
 		}); err == nil {
 			rawPayload = json.RawMessage(simplifiedPayload)
-			log.Printf("[ONENET] press_alarm simplified path=%s remote=%s unique_id=%s alarm=%v", cfg.ReceivePath, req.RemoteAddr, deviceID, alarmValue)
+			log.Printf("[ONENET] press_alarm 已简化 路径=%s 远程地址=%s 唯一ID=%s 告警值=%v", cfg.ReceivePath, req.RemoteAddr, deviceID, alarmValue)
 		}
 	}
 
@@ -282,7 +282,7 @@ func (w *Worker) handlePushData(rw http.ResponseWriter, req *http.Request, cfg C
 		_, _ = rw.Write([]byte(`{"code":0,"message":"ok"}`))
 	case <-time.After(2 * time.Second):
 		http.Error(rw, "busy", http.StatusServiceUnavailable)
-		log.Printf("[ONENET] channel busy, drop path=%s devId=%s", cfg.ReceivePath, deviceID)
+		log.Printf("[ONENET] 通道繁忙，丢弃数据 路径=%s 设备ID=%s", cfg.ReceivePath, deviceID)
 	}
 }
 

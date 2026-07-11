@@ -20,6 +20,7 @@ import (
 
 	_ "iot-middleware/plugins/aiqiangua_x8"
 	_ "iot-middleware/plugins/ctwing_aep_push_listener"
+	_ "iot-middleware/plugins/device_data_receiver"
 	_ "iot-middleware/plugins/dyf20a_poller"
 	_ "iot-middleware/plugins/generic_body_pass"
 	_ "iot-middleware/plugins/generic_http_listener"

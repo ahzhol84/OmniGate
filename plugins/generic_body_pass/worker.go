@@ -63,7 +63,7 @@ func init() {
 // Init 解析并校验插件配置。
 func (w *Worker) Init(configs []json.RawMessage) error {
 	if len(configs) == 0 {
-		return fmt.Errorf("empty configs")
+		return fmt.Errorf("配置为空")
 	}
 
 	pathIndex := make(map[string]int)
@@ -71,7 +71,7 @@ func (w *Worker) Init(configs []json.RawMessage) error {
 	for i, raw := range configs {
 		var cfg ConfigItem
 		if err := json.Unmarshal(raw, &cfg); err != nil {
-			return fmt.Errorf("config[%d] parse failed: %w", i, err)
+			return fmt.Errorf("配置[%d]解析失败: %w", i, err)
 		}
 
 		// 默认值
@@ -99,14 +99,14 @@ func (w *Worker) Init(configs []json.RawMessage) error {
 		}
 
 		if prev, exists := pathIndex[cfg.ReceivePath]; exists {
-			return fmt.Errorf("config[%d] receive_path %q conflicts with config[%d]", i, cfg.ReceivePath, prev)
+			return fmt.Errorf("配置[%d]的接收路径 %q 与配置[%d]冲突", i, cfg.ReceivePath, prev)
 		}
 		pathIndex[cfg.ReceivePath] = i
 
 		if w.listenAddr == "" {
 			w.listenAddr = cfg.ListenAddr
 		} else if w.listenAddr != cfg.ListenAddr {
-			return fmt.Errorf("all configs must use the same listen_addr, got %s and %s", w.listenAddr, cfg.ListenAddr)
+			return fmt.Errorf("所有配置必须使用相同的监听地址，当前为 %s 和 %s", w.listenAddr, cfg.ListenAddr)
 		}
 
 		w.configs = append(w.configs, cfg)
@@ -121,7 +121,7 @@ func (w *Worker) Start(ctx context.Context, out chan<- *base.DeviceData) {
 	for i := range w.configs {
 		cfg := w.configs[i]
 		handlers[cfg.ReceivePath] = w.buildHandler(cfg, out)
-		log.Printf("[GENERIC_BODY_PASS] route mounted path=%s listen=%s", cfg.ReceivePath, w.listenAddr)
+		log.Printf("[GENERIC_BODY_PASS] 路由已挂载 path=%s listen=%s", cfg.ReceivePath, w.listenAddr)
 	}
 
 	mux := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
@@ -130,7 +130,7 @@ func (w *Worker) Start(ctx context.Context, out chan<- *base.DeviceData) {
 			h(rw, req)
 			return
 		}
-		log.Printf("[GENERIC_BODY_PASS] unmatched route method=%s path=%s remote=%s", req.Method, req.URL.Path, req.RemoteAddr)
+		log.Printf("[GENERIC_BODY_PASS] 未匹配路由 method=%s path=%s remote=%s", req.Method, req.URL.Path, req.RemoteAddr)
 		http.NotFound(rw, req)
 	})
 
@@ -143,9 +143,9 @@ func (w *Worker) Start(ctx context.Context, out chan<- *base.DeviceData) {
 		_ = w.server.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("[GENERIC_BODY_PASS] listening at %s", w.listenAddr)
+	log.Printf("[GENERIC_BODY_PASS] 正在监听 %s", w.listenAddr)
 	if err := w.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Printf("[GENERIC_BODY_PASS] server exited with error: %v", err)
+		log.Printf("[GENERIC_BODY_PASS] 服务异常退出: %v", err)
 	}
 }
 
@@ -154,20 +154,20 @@ func (w *Worker) Start(ctx context.Context, out chan<- *base.DeviceData) {
 func (w *Worker) buildHandler(cfg ConfigItem, out chan<- *base.DeviceData) http.HandlerFunc {
 	return func(rw http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodPost {
-			http.Error(rw, "method not allowed", http.StatusMethodNotAllowed)
+			http.Error(rw, "请求方法不允许", http.StatusMethodNotAllowed)
 			return
 		}
 
 		// 鉴权校验（可选）
 		if !matchAuth(req, cfg.AuthHeader, cfg.AuthToken) {
-			http.Error(rw, "unauthorized", http.StatusUnauthorized)
+			http.Error(rw, "未授权", http.StatusUnauthorized)
 			return
 		}
 
 		// 读取完整 body
 		body, err := io.ReadAll(io.LimitReader(req.Body, cfg.RequestLimit))
 		if err != nil {
-			http.Error(rw, "read body failed", http.StatusBadRequest)
+			http.Error(rw, "读取请求体失败", http.StatusBadRequest)
 			return
 		}
 		_ = req.Body.Close()
@@ -222,11 +222,11 @@ func (w *Worker) buildHandler(cfg ConfigItem, out chan<- *base.DeviceData) http.
 			rw.Header().Set("Content-Type", "application/json; charset=utf-8")
 			rw.WriteHeader(http.StatusOK)
 			_, _ = rw.Write([]byte(`{"code":0,"message":"ok"}`))
-			log.Printf("[GENERIC_BODY_PASS] recv path=%s deviceID=%s body_size=%d",
+			log.Printf("[GENERIC_BODY_PASS] 收到数据 path=%s deviceID=%s body_size=%d",
 				cfg.ReceivePath, msg.DeviceID, len(body))
 		case <-time.After(3 * time.Second):
-			http.Error(rw, "busy", http.StatusServiceUnavailable)
-			log.Printf("[GENERIC_BODY_PASS] channel busy, drop path=%s deviceID=%s", cfg.ReceivePath, msg.DeviceID)
+			http.Error(rw, "服务繁忙", http.StatusServiceUnavailable)
+			log.Printf("[GENERIC_BODY_PASS] 通道繁忙，丢弃数据 path=%s deviceID=%s", cfg.ReceivePath, msg.DeviceID)
 		}
 	}
 }

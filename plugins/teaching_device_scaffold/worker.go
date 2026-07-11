@@ -97,7 +97,7 @@ func (w *Worker) Init(configs []json.RawMessage) error {
 // 4) 投递到 out（主程序会继续广播+落库）
 func (w *Worker) Start(ctx context.Context, out chan<- *base.DeviceData) {
 	if len(w.configs) == 0 {
-		log.Printf("[TEACHING] skip start: no configs")
+		log.Printf("[TEACHING] 跳过启动：无配置项")
 		return
 	}
 
@@ -105,7 +105,7 @@ func (w *Worker) Start(ctx context.Context, out chan<- *base.DeviceData) {
 	for i := range w.configs {
 		cfg := w.configs[i]
 		handlers[cfg.ReceivePath] = w.buildUplinkHandler(cfg, out)
-		log.Printf("[TEACHING] route mounted path=%s listen=%s", cfg.ReceivePath, w.listenAddr)
+		log.Printf("[TEACHING] 路由已挂载 path=%s listen=%s", cfg.ReceivePath, w.listenAddr)
 	}
 
 	mux := http.NewServeMux()
@@ -128,9 +128,9 @@ func (w *Worker) Start(ctx context.Context, out chan<- *base.DeviceData) {
 		_ = w.server.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("[TEACHING] listening at %s", w.listenAddr)
+	log.Printf("[TEACHING] 正在监听 %s", w.listenAddr)
 	if err := w.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Printf("[TEACHING] server exited with error: %v", err)
+		log.Printf("[TEACHING] 服务器退出异常: %v", err)
 	}
 }
 
